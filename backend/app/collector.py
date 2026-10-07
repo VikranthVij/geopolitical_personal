@@ -15,6 +15,7 @@ from .intelligence import canonicalize_url, content_hash
 from .entities import persist_document_mentions
 from .claims import persist_document_claims
 from .evidence import persist_document_evidence
+from .incident_resolution import resolve_document, build_document_fingerprint, persist_fingerprint
 
 
 async def ensure_feeds(pool: AsyncConnectionPool) -> None:
@@ -82,22 +83,37 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                             continue
                         await persist_document_mentions(conn, doc["id"], title, excerpt)
                         if previous:
-                            await conn.execute("INSERT INTO claim_sources(claim_id,document_id,provenance_note) SELECT c.id,%s,'Exact content hash match; same underlying report.' FROM claims c WHERE c.incident_id=%s ON CONFLICT DO NOTHING", (doc["id"], previous["incident_id"]))
+                            # Exact content dedup is an explicit identity signal; claims remain per-document.
                             await persist_document_claims(conn, doc["id"])
                             await persist_document_evidence(conn, doc["id"])
+                            fp, extras = await build_document_fingerprint(conn, doc["id"])
+                            await persist_fingerprint(conn, previous["incident_id"], fp, extras)
+                            await conn.execute("INSERT INTO document_incident_resolutions(document_id,incident_id,state,resolution_method,match_strength,matched_signals,candidates_considered) VALUES(%s,%s,'MATCHED_EXISTING','EXACT_CONTENT_HASH','STRONG',%s,'[]') ON CONFLICT(document_id) DO UPDATE SET incident_id=EXCLUDED.incident_id,state=EXCLUDED.state,resolution_method=EXCLUDED.resolution_method,match_strength=EXCLUDED.match_strength,matched_signals=EXCLUDED.matched_signals,updated_at=now()",
+                                               (doc["id"], previous["incident_id"], Jsonb([{"signal": "exact_content_hash", "value": digest}])))
                             skipped += 1
                             continue
-                        inserted += 1
-                        # Conservative initial event identity; separate documents are not assumed to be separate occurrences.
-                        # Explicit operator review/structured event resolution can link these in later processing.
+                        # A provisional incident satisfies the existing FK contract while Features 1–3 run.
+                        # The structured resolver then keeps it or replaces it with an existing incident.
                         event = await (await conn.execute("INSERT INTO event_threads(title,summary,status) VALUES(%s,%s,'DISCOVERED') RETURNING id", (title, excerpt or title))).fetchone()
-                        incident = await (await conn.execute("INSERT INTO incidents(event_thread_id,title,summary,fingerprint) VALUES(%s,%s,%s,%s) RETURNING id", (event["id"], title, excerpt or title, Jsonb({"headline": re.sub(r"[^a-z0-9 ]", "", title.lower())})))).fetchone()
+                        incident = await (await conn.execute("INSERT INTO incidents(event_thread_id,title,summary,fingerprint) VALUES(%s,%s,%s,%s) RETURNING id", (event["id"], title, excerpt or title, Jsonb({})))).fetchone()
                         await conn.execute("UPDATE documents SET incident_id=%s WHERE id=%s", (incident["id"], doc["id"]))
                         claim = await (await conn.execute("INSERT INTO claims(incident_id,statement,type,status,confidence,confidence_explanation) VALUES(%s,%s,'OCCURRENCE','REPORTED','UNVERIFIED','A source reported this; independent evidence has not been assessed.') RETURNING id", (incident["id"], title))).fetchone()
                         await conn.execute("INSERT INTO claim_sources(claim_id,document_id) VALUES(%s,%s) ON CONFLICT DO NOTHING", (claim["id"], doc["id"]))
                         await conn.execute("INSERT INTO event_updates(event_thread_id,incident_id,change_type,summary,material) VALUES(%s,%s,'DISCOVERY',%s,true)", (event["id"], incident["id"], title))
                         await persist_document_claims(conn, doc["id"])
                         await persist_document_evidence(conn, doc["id"])
+                        try:
+                            async with conn.transaction():
+                                await resolve_document(conn, doc["id"], incident["id"], event["id"])
+                        except Exception as resolution_error:
+                            # Preserve the document, source claims and evidence if the resolver fails.
+                            await conn.execute(
+                                "INSERT INTO document_incident_resolutions(document_id,incident_id,state,resolution_method,match_strength,limitation) "
+                                "VALUES(%s,%s,'RESOLUTION_FAILED','DETERMINISTIC_STRUCTURED_V1','UNKNOWN',%s) "
+                                "ON CONFLICT(document_id) DO UPDATE SET state='RESOLUTION_FAILED',match_strength='UNKNOWN',limitation=EXCLUDED.limitation,updated_at=now()",
+                                (doc["id"], incident["id"], f"{type(resolution_error).__name__}: structured resolution failed; the staged incident was retained."),
+                            )
+                        inserted += 1
                 totals["inserted"] += inserted
                 totals["skipped"] += skipped
                 async with pool.connection() as conn:

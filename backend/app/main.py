@@ -209,6 +209,46 @@ async def document_evidence(document_id: UUID):
             "evidence": list(evidence_by_id.values())}
 
 
+@app.get("/documents/{document_id}/resolution")
+async def document_resolution(document_id: UUID):
+    rows = await fetch_all(
+        "SELECT d.id document_id,d.title document_title,d.source_id,d.incident_id,i.title incident_title,i.event_thread_id,"
+        "r.state,r.resolution_method,r.match_strength,r.matched_signals,r.conflicts,r.candidates_considered,r.limitation,r.updated_at "
+        "FROM documents d LEFT JOIN incidents i ON i.id=d.incident_id LEFT JOIN document_incident_resolutions r ON r.document_id=d.id "
+        "WHERE d.id=%s", (document_id,))
+    if not rows:
+        raise HTTPException(404, "document not found")
+    result = rows[0]
+    result["fingerprint"] = await fetch_all(
+        "SELECT fp.primary_actor_id,ea.canonical_name primary_actor,fp.action_predicate,fp.target_entity_id,et.canonical_name target,"
+        "fp.object_entity_id,eo.canonical_name object,fp.location_entity_id,el.canonical_name location,fp.event_time_start,"
+        "fp.event_time_end,fp.event_time_expression,fp.time_precision,fp.quantity,fp.consequence,fp.response,fp.supporting_entities,fp.source_metadata "
+        "FROM incident_fingerprints fp LEFT JOIN entities ea ON ea.id=fp.primary_actor_id LEFT JOIN entities et ON et.id=fp.target_entity_id "
+        "LEFT JOIN entities eo ON eo.id=fp.object_entity_id LEFT JOIN entities el ON el.id=fp.location_entity_id WHERE fp.incident_id=%s",
+        (result["incident_id"],)) if result["incident_id"] else []
+    result["documents"] = await fetch_all(
+        "SELECT d.id,d.title,d.canonical_url,d.published_at,s.name source_name FROM documents d JOIN sources s ON s.id=d.source_id "
+        "WHERE d.incident_id=%s ORDER BY d.published_at NULLS LAST,d.created_at", (result["incident_id"],)) if result["incident_id"] else []
+    return result
+
+
+@app.get("/incidents/{incident_id}")
+async def incident_detail(incident_id: UUID):
+    row = await fetch_all("SELECT i.*,fp.primary_actor_id,ea.canonical_name primary_actor,fp.action_predicate,fp.target_entity_id,et.canonical_name target,"
+        "fp.object_entity_id,eo.canonical_name object,fp.location_entity_id,el.canonical_name location,fp.event_time_start,fp.event_time_end,"
+        "fp.event_time_expression,fp.time_precision,fp.quantity,fp.consequence,fp.response,fp.supporting_entities "
+        "FROM incidents i LEFT JOIN incident_fingerprints fp ON fp.incident_id=i.id LEFT JOIN entities ea ON ea.id=fp.primary_actor_id "
+        "LEFT JOIN entities et ON et.id=fp.target_entity_id LEFT JOIN entities eo ON eo.id=fp.object_entity_id "
+        "LEFT JOIN entities el ON el.id=fp.location_entity_id WHERE i.id=%s", (incident_id,))
+    if not row:
+        raise HTTPException(404, "incident not found")
+    result = row[0]
+    result["documents"] = await fetch_all("SELECT d.id,d.title,d.canonical_url,d.published_at,s.name source_name FROM documents d JOIN sources s ON s.id=d.source_id WHERE d.incident_id=%s ORDER BY d.published_at NULLS LAST,d.created_at", (incident_id,))
+    result["resolutions"] = await fetch_all("SELECT document_id,state,resolution_method,match_strength,matched_signals,conflicts,candidates_considered,updated_at FROM document_incident_resolutions WHERE incident_id=%s ORDER BY created_at", (incident_id,))
+    result["evidence"] = await fetch_all("SELECT DISTINCT e.id,e.type,e.description,e.identity_key FROM incident_fingerprint_evidence ie JOIN evidence e ON e.id=ie.evidence_id WHERE ie.incident_id=%s ORDER BY e.id", (incident_id,))
+    return result
+
+
 @app.get("/events")
 async def events(section: str = Query("all", pattern="^(all|india|global|other)$"), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     where = {"india": "india_relevance > 0", "global": "india_relevance = 0 AND importance_level >= 2", "other": "india_relevance = 0 AND importance_level < 2"}.get(section, "TRUE")

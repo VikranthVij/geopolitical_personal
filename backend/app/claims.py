@@ -350,7 +350,9 @@ async def persist_document_claims(conn, document_id) -> int:
         if any(s.character_start < 0 or s.character_end > len(doc["title"] if s.text_field == "TITLE" else (doc["excerpt"] or ""))
                or (doc["title"] if s.text_field == "TITLE" else (doc["excerpt"] or ""))[s.character_start:s.character_end] != s.source_text for s in candidate.spans):
             continue
-        canonical_key = "extract:" + candidate.identity
+        # Claim rows stay document-specific even when Feature 4 groups their documents
+        # under one incident. This preserves differing quantities and source wording.
+        canonical_key = f"extract:{document_id}:" + candidate.identity
         row = None
         if candidate.type == "OCCURRENCE" and any(s.text_field == "TITLE" and s.source_text == doc["title"] for s in candidate.spans):
             legacy = await (await conn.execute(

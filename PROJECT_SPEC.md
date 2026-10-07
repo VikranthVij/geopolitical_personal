@@ -10,6 +10,7 @@ Build a local-first intelligence system that turns public source material into t
 - Docker Compose runs PostgreSQL, API/worker, and web UI. No Kubernetes, Kafka, Redis cluster, or unnecessary services.
 - PostgreSQL is the system of record. Vectors retrieve candidates; structured evidence and reasoning determine identity and confidence.
 - Event thread is a persistent geopolitical situation; incident is a discrete occurrence. Articles are never incidents. Temporal proximity and embedding similarity alone never merge events.
+- Document-to-incident identity uses structured claim/entity/evidence fields through a deterministic candidate retriever and resolver. Event-thread causality/grouping is a separate later capability; uncertain identity remains unmerged or marked for review.
 - Preserve source lineage and evidence independence. Contradictions stay visible; confidence and importance remain separate.
 - LLM outputs are grounded and labelled FACT, REPORTED_CLAIM, INFERENCE, ANALYSIS, SPECULATION, or UNKNOWN. The model cannot decide truth, credibility, final event identity, contradiction, confidence, or canonical history identity.
 - India relevance has explicit causal pathways. Correlation/anomaly alone does not establish causation.
@@ -40,7 +41,7 @@ Build a local-first intelligence system that turns public source material into t
 - [x] Milestone 1: Compose, PostgreSQL/pgvector schema and reproducible migrations, health checks, environment example.
 - [x] Milestone 2 foundation: configurable RSS feed list, repeat-safe document ingestion, collection-run audit and URL/exact-content deduplication. Structured normalization/resolution is still outstanding.
 - [x] Milestone 3: entity/claim/evidence models and deterministic extraction/provenance (entity aliases/mentions, structured claims/spans/entity links, evidence/source spans, claim/evidence relations, and document debugging APIs implemented; identity reuse is explicit-reference only and independence is a provenance foundation).
-- [ ] Milestone 4: structured fingerprint candidate retrieval and incident/event resolution; no vector-only merges.
+- [x] Milestone 4: structured document-to-incident fingerprints, indexed candidate retrieval, deterministic resolution, source-specific claims/evidence, audit metadata, and controlled regression verification. Incident-to-event-thread resolution is not included.
 - [ ] Milestone 5: contradiction, confidence, importance, and material-update rules.
 - [ ] Milestone 6: shared canonical history and contextual interpretations.
 - [ ] Milestone 7: India exposure graph, observations, hypotheses, explicit causality labels.
