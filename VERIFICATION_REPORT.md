@@ -101,7 +101,7 @@ Six unit tests pass for URL canonicalization, whitespace-stable content hashes, 
 - Evidence identity is conservative and requires an explicit identifier or URL. Similar descriptions, different URLs, or different publishers alone do not establish identity or independence.
 - Provenance/lineage is an independence foundation, not a final independence score. Unknown origins and unresolved citations remain explicit/unknown.
 - Claim/evidence relationship cues are bounded; ambiguous multi-evidence or multi-claim sentences remain `INCONCLUSIVE`. An official statement never automatically supports the underlying event claim.
-- Truth confidence, contradiction detection, incident/event resolution, embeddings, and LLM analysis are not implemented.
+- At the Feature 3 verification point, incident/event resolution, truth confidence, contradiction detection, embeddings, and LLM analysis were not implemented. Feature 5 below subsequently added incident-to-event-thread resolution.
 
 ## Feature 4 — Structured document-to-incident resolution (2026-10-07)
 
@@ -112,7 +112,7 @@ Six unit tests pass for URL canonicalization, whitespace-stable content hashes, 
 - Matching requires multiple structured signals and time compatibility or evidence identity plus other signals. Actor/target conflict and major exact-time conflicts prevent matching. Shared evidence alone does not merge. Quantity discrepancies remain visible in the audit without becoming a split rule. Equal candidate matches remain `AMBIGUOUS`; multi-occurrence documents are `REVIEW_REQUIRED`.
 - New reports stage entities, claims and evidence before resolution. Claims receive a document-scoped canonical key, so different reports attached to one incident retain independent claims and spans. Evidence identity can be shared while document/source provenance remains linked. Resolver failures preserve the provisional incident and Feature 1–3 data with a `RESOLUTION_FAILED` audit state.
 - `GET /documents/{document_id}/resolution` and `GET /incidents/{incident_id}` expose the incident fingerprint, attached documents, candidates considered, match reasons, conflicts, status, evidence and method. A controlled dry-run/apply command is provided at `backend/app/backfill_incident_fingerprints.py`; it indexes existing structured claims/evidence without merging or reassigning legacy records.
-- This does not resolve incident-to-event-thread relationships, truth confidence, contradiction, importance, India relevance, embeddings, vector retrieval, RAG, or LLM analysis. The current schema assigns one incident per article; articles with multiple distinct occurrence predicates are explicitly held for review rather than decomposed.
+- At the Feature 4 verification point, incident-to-event-thread relationships were not yet implemented. Feature 5 below subsequently added that layer. Truth confidence, contradiction, importance, India relevance, embeddings, vector retrieval, RAG, and LLM analysis remain outside Feature 4. The current schema assigns one incident per article; articles with multiple distinct occurrence predicates are explicitly held for review rather than decomposed.
 
 ### Verification results
 
@@ -124,11 +124,35 @@ Six unit tests pass for URL canonicalization, whitespace-stable content hashes, 
 - CPU resolver-only 50-report timing measured 0.001498 seconds in the final run; the automated test asserts the resolver stays below 1.0 second. This excludes SQL retrieval and network. Migration 007 applied; the full 001–007 chain passed in a temporary clean PostgreSQL database, then the temporary database was dropped. Live API restarted, health/OpenAPI routes were checked, `docker compose config -q`, Python compilation and `git diff --check` passed.
 - Existing development records were not re-resolved. The explicit dry run counted 14 prior documents; the index-only `--apply` then populated 14 incident fingerprints and zero resolution audits, without changing any document assignment. New ingestion writes its own audit row.
 
-- The collector stores one reported headline claim per new source document. Exact URL/content duplicates are reused, but differently worded coverage is not yet resolved into a shared Incident. New documents currently create separate Event Threads and Incidents.
+## Feature 5 — Incident-to-Event Thread resolution (2026-10-07)
+
+### Implementation and boundaries
+
+- Migration `008_event_thread_resolution.sql` adds thread lifecycle/status and time fields, structured per-incident context, indexed aggregate profiles, incident-to-incident relationship edges, and per-assignment audit records.
+- The collector invokes deterministic Feature 5 resolution only after Feature 4 document-to-incident resolution. Distinct incident rows are retained; one primary thread membership is stored on each incident. Exact-content duplicates remain attached to their existing incident.
+- Candidate retrieval uses canonical entity IDs, context domains, and time with a hard cap of 50 thread profiles. Time/location alone do not merge. Shared participant and context-domain continuity plus a bounded 30-day window support ordinary continuation. Explicit response/cause language can support long-gap continuity. Multiple matches are `AMBIGUOUS`; plausible but incomplete continuity is `REVIEW_REQUIRED`.
+- Response/causal relationships are separate rows with a unique incident-pair/relation key. Thread titles are deterministic from canonical structured names/domains. Inactivity does not imply conclusion. Resolver failures preserve the provisional incident and use an isolated savepoint plus `RESOLUTION_FAILED` audit.
+- Debug APIs: `GET /incidents/{incident_id}/event-thread`, `GET /event-threads/{event_thread_id}`, `GET /event-threads/{event_thread_id}/timeline`, and `GET /event-threads/{event_thread_id}/relationships`. `python -m app.backfill_event_threads` previews in a rollback-only transaction; `--apply` is the explicit persistence mode.
+
+### Verification results
+
+- Host Python compilation and all 64 backend tests passed; nine database/API tests skip in the host-only run without their environment variables. The full 64-test suite also passed inside Docker with all PostgreSQL/API integration tests enabled, covering Features 1–5.
+- Live PostgreSQL acceptance grouped five distinct related incidents into one Event Thread, persisted four `RESPONDED_TO` edges, retained a separate unrelated incident despite shared place/time, and verified repeated resolution added no audit or membership. All fixture rows were rolled back.
+- Indexed candidate retrieval was exercised against 100, 500, and 1,000 profiles: 0.0010 s, 0.0006 s, and 0.0007 s in the final recorded run, returning no more than 50 candidates each time. The five-incident acceptance and API routes passed against the running Docker services.
+- The default database backfill preview inspected 15 existing incidents and 15 provisional threads, proposed new-thread assignments for all 15, and rolled back. No existing records were changed by preview. The preview also showed that current legacy incidents lack enough structured relationship context to join one another.
+- Migrations 001–008 applied in order to a disposable clean PostgreSQL database, which was dropped afterward. `npm run build` completed successfully for the frontend; the running API health returned `ok`, and the dashboard returned HTTP 200.
+
+### Boundaries and limitations
+
+- Thread context depends on persisted canonical entity roles, Feature 4 fingerprints, and bounded deterministic claim-language cues. Unsupported/unresolved entity mentions remain unknown; this is not general-language causal inference.
+- The collector creates a new provisional thread for each new incident, then consolidates the incident into a selected existing thread only when deterministic rules support the match. Historical assignments remain unchanged unless the explicit backfill `--apply` mode is run.
+- No thread is marked `CONCLUDED` from inactivity. The feature does not calculate truth confidence, contradiction, importance, India relevance, forecasting, or alert signals.
+
+- At the Feature 4 verification point, differently worded coverage was not yet resolved into a shared Incident, and each new incident retained its own provisional Event Thread. Feature 5 above subsequently added cross-document incident resolution and conservative incident-to-thread consolidation.
 - Source-independence scoring, logical contradiction persistence, explainable confidence calculations, importance calculations, and material-change resolution remain incomplete.
 - Historical search/reuse/contextual interpretation and India exposure graph/hypothesis workflows have schema/API foundations only; no automatic graph relevance, causal investigation, or observations are currently produced.
 - Ollama supports citation-validated event Q&A only. Embedding generation/retrieval, cache invalidation, grounded summaries, and what-to-watch generation remain incomplete.
-- The 50-report, separate-incidents/shared-thread, unrelated-semantic-events, source-copy independence, historical reuse, India causality, feed-failure, and startup catch-up end-to-end acceptance scenarios were not run.
+- Broader 50-report separate-incidents/shared-thread, unrelated-semantic-events, source-copy independence, historical reuse, India causality, feed-failure, and startup catch-up end-to-end scenarios remain outside Feature 5 verification.
 
 ## Manual intervention
 

@@ -16,6 +16,7 @@ from .entities import persist_document_mentions
 from .claims import persist_document_claims
 from .evidence import persist_document_evidence
 from .incident_resolution import resolve_document, build_document_fingerprint, persist_fingerprint
+from .event_thread_resolution import resolve_incident_to_thread, record_thread_resolution_failure
 
 
 async def ensure_feeds(pool: AsyncConnectionPool) -> None:
@@ -102,9 +103,11 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                         await conn.execute("INSERT INTO event_updates(event_thread_id,incident_id,change_type,summary,material) VALUES(%s,%s,'DISCOVERY',%s,true)", (event["id"], incident["id"], title))
                         await persist_document_claims(conn, doc["id"])
                         await persist_document_evidence(conn, doc["id"])
+                        resolved_incident_id = incident["id"]
                         try:
                             async with conn.transaction():
-                                await resolve_document(conn, doc["id"], incident["id"], event["id"])
+                                incident_resolution = await resolve_document(conn, doc["id"], incident["id"], event["id"])
+                                resolved_incident_id = incident_resolution.incident_id or incident["id"]
                         except Exception as resolution_error:
                             # Preserve the document, source claims and evidence if the resolver fails.
                             await conn.execute(
@@ -113,6 +116,11 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                                 "ON CONFLICT(document_id) DO UPDATE SET state='RESOLUTION_FAILED',match_strength='UNKNOWN',limitation=EXCLUDED.limitation,updated_at=now()",
                                 (doc["id"], incident["id"], f"{type(resolution_error).__name__}: structured resolution failed; the staged incident was retained."),
                             )
+                        try:
+                            async with conn.transaction():
+                                await resolve_incident_to_thread(conn, resolved_incident_id)
+                        except Exception as thread_error:
+                            await record_thread_resolution_failure(conn, resolved_incident_id, thread_error)
                         inserted += 1
                 totals["inserted"] += inserted
                 totals["skipped"] += skipped

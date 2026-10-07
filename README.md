@@ -36,6 +36,7 @@ npm run build
 
 - `GET /health`, `GET /events?section=india|global|other|all`
 - `GET /events/{id}`, `/timeline`, `/evidence`, `/history`, `/india-impact`, `/changes`
+- `GET /incidents/{id}/event-thread`, `GET /event-threads/{id}`, `/timeline`, and `/relationships` expose Feature 5 thread assignment, members, timeline, and explicit incident links.
 - `POST /events/{id}/ask` with `{"question":"..."}`; answers are returned only when Ollama provides verifiable stored-claim citations, otherwise generated conclusions are withheld.
 - `POST /events/{id}/watch` toggles watch; `GET /watchlist`
 - `POST /collection/run` starts an on-demand run; `GET /collection/runs` shows run history.
@@ -43,5 +44,7 @@ npm run build
 ## Operations and privacy
 
 The initial feed list is intentionally small and editable in `backend/app/default_feeds.py`. On first run it scans up to 60 days of RSS items by default because some official feeds refresh slowly; URLs and content hashes prevent repeat processing. Review publisher terms before enabling additional feeds or retaining excerpts. Collection records per-feed errors and continues with other feeds. Migrations are checked into `backend/migrations` and run once under a PostgreSQL advisory lock. Back up through standard PostgreSQL tools; database dumps are local user data and must not be committed.
+
+The Feature 5 legacy preview defaults to rollback-only: `docker compose exec api python -m app.backfill_event_threads`. Review its report before persisting deterministic assignments with `--apply`.
 
 Do not expose the API or database directly to the public internet. Private remote access through Tailscale requires device/account authorization on the user's Mac and is not enabled by this project.

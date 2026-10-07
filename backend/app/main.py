@@ -249,6 +249,67 @@ async def incident_detail(incident_id: UUID):
     return result
 
 
+@app.get("/incidents/{incident_id}/event-thread")
+async def incident_event_thread(incident_id: UUID):
+    rows = await fetch_all("SELECT i.id incident_id,i.title incident_title,i.summary incident_summary,i.occurred_at,i.event_thread_id,"
+        "e.title event_thread_title,e.status,e.thread_status,e.started_at,e.ended_at,e.latest_activity_at,a.state assignment_state,"
+        "a.resolver_method,a.resolver_version,a.matched_signals,a.conflicts,a.candidates_considered,a.relationship_ids,a.reason,a.created_at assigned_at "
+        "FROM incidents i JOIN event_threads e ON e.id=i.event_thread_id LEFT JOIN LATERAL (SELECT * FROM event_thread_resolution_audits x "
+        "WHERE x.incident_id=i.id ORDER BY x.created_at DESC LIMIT 1) a ON true WHERE i.id=%s", (incident_id,))
+    if not rows:
+        raise HTTPException(404, "incident not found")
+    result = rows[0]
+    result["related_incidents"] = await fetch_all("SELECT i.id,i.title,i.summary,i.occurred_at,r.relation,r.evidence FROM event_thread_incident_relationships r "
+        "JOIN incidents i ON i.id=CASE WHEN r.from_incident_id=%s THEN r.to_incident_id ELSE r.from_incident_id END "
+        "WHERE r.event_thread_id=%s AND (r.from_incident_id=%s OR r.to_incident_id=%s) ORDER BY i.occurred_at NULLS LAST,i.created_at",
+        (incident_id,result["event_thread_id"],incident_id,incident_id))
+    result["relationships"] = await fetch_all("SELECT id,from_incident_id,to_incident_id,relation,evidence,created_at FROM event_thread_incident_relationships "
+        "WHERE event_thread_id=%s AND (from_incident_id=%s OR to_incident_id=%s) ORDER BY created_at", (result["event_thread_id"],incident_id,incident_id))
+    return result
+
+
+@app.get("/event-threads/{event_thread_id}")
+async def event_thread_detail(event_thread_id: UUID):
+    rows = await fetch_all("SELECT e.*,p.actor_entity_ids,p.participant_entity_ids,p.target_entity_ids,p.location_entity_ids,p.context_domains,"
+        "p.latest_incident_at,p.incident_count FROM event_threads e LEFT JOIN event_thread_profiles p ON p.event_thread_id=e.id WHERE e.id=%s",
+        (event_thread_id,))
+    if not rows:
+        raise HTTPException(404, "event thread not found")
+    result = rows[0]
+    result["incidents"] = await fetch_all("SELECT i.id,i.title,i.summary,i.occurred_at,i.created_at,fp.primary_actor_id,fp.action_predicate,"
+        "fp.target_entity_id,fp.location_entity_id,ctx.context_domains FROM incidents i LEFT JOIN incident_fingerprints fp ON fp.incident_id=i.id "
+        "LEFT JOIN incident_thread_contexts ctx ON ctx.incident_id=i.id WHERE i.event_thread_id=%s ORDER BY i.occurred_at NULLS LAST,i.created_at,i.id",
+        (event_thread_id,))
+    result["actors"] = await fetch_all("SELECT DISTINCT e.id,e.canonical_name,e.type FROM event_thread_profiles p CROSS JOIN LATERAL unnest(p.actor_entity_ids) x(id) "
+        "JOIN entities e ON e.id=x.id WHERE p.event_thread_id=%s ORDER BY e.canonical_name", (event_thread_id,))
+    result["locations"] = await fetch_all("SELECT DISTINCT e.id,e.canonical_name,e.type FROM event_thread_profiles p CROSS JOIN LATERAL unnest(p.location_entity_ids) x(id) "
+        "JOIN entities e ON e.id=x.id WHERE p.event_thread_id=%s ORDER BY e.canonical_name", (event_thread_id,))
+    result["relationships"] = await fetch_all("SELECT id,from_incident_id,to_incident_id,relation,evidence,created_at FROM event_thread_incident_relationships "
+        "WHERE event_thread_id=%s ORDER BY created_at", (event_thread_id,))
+    result["resolution_audits"] = await fetch_all("SELECT incident_id,state,resolver_method,resolver_version,matched_signals,conflicts,candidates_considered,reason,created_at "
+        "FROM event_thread_resolution_audits WHERE event_thread_id=%s ORDER BY created_at", (event_thread_id,))
+    return result
+
+
+@app.get("/event-threads/{event_thread_id}/timeline")
+async def event_thread_timeline(event_thread_id: UUID):
+    if not await fetch_all("SELECT id FROM event_threads WHERE id=%s", (event_thread_id,)):
+        raise HTTPException(404, "event thread not found")
+    return await fetch_all("SELECT i.id incident_id,i.title,i.summary,i.occurred_at,i.created_at,ctx.time_precision FROM incidents i "
+        "LEFT JOIN incident_thread_contexts ctx ON ctx.incident_id=i.id WHERE i.event_thread_id=%s ORDER BY i.occurred_at NULLS LAST,i.created_at,i.id",
+        (event_thread_id,))
+
+
+@app.get("/event-threads/{event_thread_id}/relationships")
+async def event_thread_relationships(event_thread_id: UUID):
+    if not await fetch_all("SELECT id FROM event_threads WHERE id=%s", (event_thread_id,)):
+        raise HTTPException(404, "event thread not found")
+    return await fetch_all("SELECT r.id,r.from_incident_id,r.to_incident_id,r.relation,r.evidence,r.created_at,"
+        "a.title from_incident_title,b.title to_incident_title FROM event_thread_incident_relationships r "
+        "JOIN incidents a ON a.id=r.from_incident_id JOIN incidents b ON b.id=r.to_incident_id WHERE r.event_thread_id=%s ORDER BY r.created_at",
+        (event_thread_id,))
+
+
 @app.get("/events")
 async def events(section: str = Query("all", pattern="^(all|india|global|other)$"), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     where = {"india": "india_relevance > 0", "global": "india_relevance = 0 AND importance_level >= 2", "other": "india_relevance = 0 AND importance_level < 2"}.get(section, "TRUE")
