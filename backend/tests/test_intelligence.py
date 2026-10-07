@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.intelligence import candidate_score, canonicalize_url, claims_incompatible, confidence_summary, content_hash, event_fingerprint
+from app.default_feeds import is_relevant_iaea
 
 
 class IntelligenceRulesTest(unittest.TestCase):
@@ -30,6 +31,10 @@ class IntelligenceRulesTest(unittest.TestCase):
         level, explanation = confidence_summary(4, 1, True)
         self.assertEqual(level, "CONTESTED")
         self.assertIn("contradictory", explanation)
+
+    def test_iaea_feed_excludes_science_only_headlines(self):
+        self.assertTrue(is_relevant_iaea("Director General Statement on Situation in Ukraine"))
+        self.assertFalse(is_relevant_iaea("How Nuclear Science Helps Tackle Food Waste"))
 
 
 if __name__ == "__main__":

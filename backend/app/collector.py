@@ -10,16 +10,19 @@ import httpx
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Jsonb
 
-from .default_feeds import FEEDS
+from .default_feeds import FEEDS, RETIRED_FEED_NAMES, is_relevant_iaea
 from .intelligence import canonicalize_url, content_hash
 
 
 async def ensure_feeds(pool: AsyncConnectionPool) -> None:
     async with pool.connection() as conn:
+        for name in RETIRED_FEED_NAMES:
+            await conn.execute("UPDATE source_feeds f SET enabled=false FROM sources s WHERE f.source_id=s.id AND s.name=%s", (name,))
+            await conn.execute("UPDATE sources SET enabled=false WHERE name=%s", (name,))
         for name, url, tier, category in FEEDS:
-            source = await conn.execute("INSERT INTO sources(name,base_url,tier,source_type) VALUES(%s,%s,%s,'PUBLISHER') ON CONFLICT(name) DO UPDATE SET base_url=EXCLUDED.base_url RETURNING id", (name, url, tier))
+            source = await conn.execute("INSERT INTO sources(name,base_url,tier,source_type) VALUES(%s,%s,%s,'PUBLISHER') ON CONFLICT(name) DO UPDATE SET base_url=EXCLUDED.base_url,enabled=true RETURNING id", (name, url, tier))
             source_id = (await source.fetchone())["id"]
-            await conn.execute("INSERT INTO source_feeds(source_id,url,category) VALUES(%s,%s,%s) ON CONFLICT(url) DO NOTHING", (source_id, url, category))
+            await conn.execute("INSERT INTO source_feeds(source_id,url,category) VALUES(%s,%s,%s) ON CONFLICT(url) DO UPDATE SET enabled=true", (source_id, url, category))
 
 
 def clean_text(value: str) -> str:
@@ -49,13 +52,18 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                     link = canonicalize_url(entry.get("link", ""))
                     title = clean_text(entry.get("title", ""))
                     excerpt = clean_text(entry.get("summary", entry.get("description", "")))[:1200]
+                    if source_name == "International Atomic Energy Agency" and not is_relevant_iaea(f"{title} {excerpt}"):
+                        skipped += 1
+                        continue
                     if not link or not title:
                         skipped += 1
                         continue
                     published = None
                     if entry.get("published_parsed"):
                         published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-                    max_age = int(os.getenv("MAX_DOCUMENT_AGE_DAYS", "14"))
+                    # RSS feeds often expose only a small rolling batch. Give first-run
+                    # catch-up a wider window; hashes/URLs prevent repeat processing.
+                    max_age = int(os.getenv("MAX_DOCUMENT_AGE_DAYS", "60"))
                     if published and published < datetime.now(timezone.utc) - timedelta(days=max_age):
                         skipped += 1
                         continue

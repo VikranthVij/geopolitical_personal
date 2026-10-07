@@ -61,6 +61,6 @@ Build a local-first intelligence system that turns public source material into t
 ## Manual setup points
 
 1. Docker Desktop must be installed and running to launch the stack.
-2. Ollama and a selected local model are optional for deterministic collection/API operation; install/start Ollama and pull the configured model to enable generated analyses.
+2. Ollama and a selected local model are optional for deterministic collection/API operation. On the current host, Ollama's local API is not listening and the installed CLI crashes during Metal/MLX startup; repair/update the local runtime before pulling the configured model for generated analyses.
 3. RSS availability and publisher terms vary. Review and configure `backend/app/default_feeds.py` for the user's preferred sources and permitted retention.
 4. Private remote access requires the user's Tailscale account/device authorization; it is intentionally not enabled automatically.

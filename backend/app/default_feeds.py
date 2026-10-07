@@ -1,7 +1,21 @@
 """Small discovery set; users should review source terms before enabling feeds."""
 FEEDS = [
-    ("United Nations News", "https://news.un.org/feed/subscribe/en/news/all/rss.xml", 1, "GLOBAL"),
-    ("India Ministry of External Affairs", "https://www.mea.gov.in/press-releases.htm?dtl/36753/rss", 1, "INDIA"),
+    ("UN Geneva Press Releases", "https://www.ungeneva.org/en/news-media/press-releases-list/rss.xml", 1, "GLOBAL"),
     ("International Atomic Energy Agency", "https://www.iaea.org/feeds/topnews", 1, "GLOBAL"),
-    ("NATO News", "https://www.nato.int/cps/en/natohq/news.htm?query=&search=true&display_mode=rss", 1, "GLOBAL"),
 ]
+
+RETIRED_FEED_NAMES = ("United Nations News", "India Ministry of External Affairs", "NATO News")
+
+# The IAEA feed also carries science and health news. Retain only headlines with
+# clear country, security, safeguards, conflict, or strategic-energy context.
+IAEA_RELEVANCE_TERMS = (
+    "ukraine", "russia", "iran", "korea", "safeguard", "nuclear safety",
+    "nuclear power", "nuclear energy", "nuclear plant", "nuclear facility",
+    "director general statement", "non-proliferation", "proliferation", "npt",
+    "conflict", "war", "attack", "radiological", "atomic energy",
+)
+
+
+def is_relevant_iaea(text: str) -> bool:
+    normalized = text.lower()
+    return any(term in normalized for term in IAEA_RELEVANCE_TERMS)

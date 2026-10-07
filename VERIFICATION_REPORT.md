@@ -2,31 +2,36 @@
 
 ## Current result
 
-The runnable foundation passes local source-level checks. V1 is not complete and should not be treated as operational intelligence software yet. The database, feed collection, and UI have not been exercised together because Docker Desktop is not running on the host.
+The runnable foundation passes local checks and the Compose stack has now been exercised end to end. V1 is not complete and should not be treated as operational intelligence software yet.
 
 ## Pass 1 — Functional surface
 
 - Compose configuration parses successfully.
 - Backend imports with its pinned dependencies and publishes 17 OpenAPI paths, including health, event detail, timeline, evidence, history, India impact, changes, ask, watch, and collection.
-- Next.js production build succeeds and generates the dashboard route.
+- A clean PostgreSQL 16 + pgvector volume started; all three migrations applied and PostgreSQL reports 36 public tables.
+- API `/health` returned `ok` with a connected database; event list/detail, timeline, evidence, history, India-impact, changes, contradictions, related-events, and watch-indicator routes responded for a collected record.
+- Next.js production build succeeded in Docker; the dashboard returned HTTP 200.
+- The reversible watch on/off flow worked. Q&A returned the safe unavailable-provider response because Ollama is not installed/running.
 
 ## Pass 2 — Adversarial deterministic rules
 
-Five unit tests pass for URL canonicalization, whitespace-stable content hashes, structured fingerprint match reporting, explicit same-scope numeric conflicts vs differing-scope quantities, and contested confidence behavior.
+Six unit tests pass for URL canonicalization, whitespace-stable content hashes, structured fingerprint match reporting, explicit same-scope numeric conflicts vs differing-scope quantities, contested confidence behavior, and the IAEA relevance filter.
 
 ## Pass 3 — Regression and dependency checks
 
-- Full implemented Python unit suite: 5 passed.
+- Full implemented Python unit suite: 6 passed.
 - Python compile check: passed.
 - Frontend production build: passed.
 - Frontend offline npm audit: 0 vulnerabilities.
 - `docker compose config`: passed.
 - `git diff --check`: passed.
 
-## Blocked verification
+## Collection verification
 
-- `docker info` reports it cannot connect to `unix:///Users/devilphoenix/.docker/run/docker.sock`. Start Docker Desktop, then run `docker compose up --build` and verify `/health`, migration logs, `/collection/runs`, and the dashboard.
-- Consequently, clean-database migration, actual RSS startup catch-up, end-to-end ingestion, and persistent watch/update behavior are not yet verified.
+- First startup exposed an obsolete UN News URL (404), a wrong MEA URL, and irrelevant IAEA science headlines. The starter feeds were corrected: the dead UN News URL was retired, UN Geneva Press Releases became active, stale MEA/NATO feeds were disabled, and a subject filter was added to the broad IAEA feed.
+- Current configured feeds (UN Geneva and IAEA) returned 25 feed entries on a fresh run; 3 were inserted and the rest were skipped by age/relevance/deduplication. Both feeds completed successfully with no errors. A subsequent catch-up run skipped the already processed entries and inserted no duplicates.
+- The old failed run remains in audit history as evidence of feed failure handling; current enabled feeds are successful.
+- Ollama's local API is not listening on port 11434. The installed `ollama list` CLI crashes during Metal/MLX initialization (`NSRangeException`, array index 0 on an empty array), so model-backed Q&A safely falls back to an unavailable-provider response.
 
 ## Acceptance gaps
 
@@ -38,4 +43,4 @@ Five unit tests pass for URL canonicalization, whitespace-stable content hashes,
 
 ## Manual intervention
 
-Start Docker Desktop. To enable model-backed Q&A, separately install/start Ollama and pull `qwen2.5:7b`. Feed availability and permitted excerpt retention should be reviewed before relying on any source.
+To enable model-backed Q&A, repair/update the installed Ollama runtime, start its local service, confirm `http://localhost:11434/api/tags` responds, and pull `qwen2.5:7b`. The Q&A path then uses the configured host URL from Docker. Feed availability and permitted excerpt retention should be reviewed before relying on any source.

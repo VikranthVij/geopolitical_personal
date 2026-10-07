@@ -42,6 +42,6 @@ npm run build
 
 ## Operations and privacy
 
-The initial feed list is intentionally small and editable in `backend/app/default_feeds.py`. Review publisher terms before enabling additional feeds or retaining excerpts. Collection records per-feed errors and continues with other feeds. Migrations are checked into `backend/migrations` and run once under a PostgreSQL advisory lock. Back up through standard PostgreSQL tools; database dumps are local user data and must not be committed.
+The initial feed list is intentionally small and editable in `backend/app/default_feeds.py`. On first run it scans up to 60 days of RSS items by default because some official feeds refresh slowly; URLs and content hashes prevent repeat processing. Review publisher terms before enabling additional feeds or retaining excerpts. Collection records per-feed errors and continues with other feeds. Migrations are checked into `backend/migrations` and run once under a PostgreSQL advisory lock. Back up through standard PostgreSQL tools; database dumps are local user data and must not be committed.
 
 Do not expose the API or database directly to the public internet. Private remote access through Tailscale requires device/account authorization on the user's Mac and is not enabled by this project.
