@@ -75,10 +75,36 @@ Six unit tests pass for URL canonicalization, whitespace-stable content hashes, 
 
 - CPU-only extraction for the checked-in multi-sentence fixture took 0.193 s / 100 documents (1.929 ms per document), 0.892 s / 500 (1.785 ms/doc), and 1.759 s / 1,000 (1.759 ms/doc). These figures exclude database writes, feeds, and API serialization. Peak transient memory was small in this fixture run; timings are host-specific.
 - This is bounded rule-based extraction, not general language understanding. It may miss unlisted predicates, entities, complex coreference, cross-sentence argument links, and intricate reporting grammar. Temporal normalization deliberately leaves weekday/relative expressions unresolved without a safe reference date. It does not merge semantic paraphrases. Extraction confidence is not claim truth confidence; the latter remains `UNVERIFIED`.
-- Evidence extraction/independence, contradictions, truth confidence, importance, incident/event resolution, historical/India analysis, retrieval, and LLM analysis remain unimplemented.
+- At the Feature 2 milestone, evidence extraction had not yet been implemented; Feature 3's evidence/provenance foundation is recorded below. Contradiction detection, truth confidence, importance, incident/event resolution, historical/India analysis, retrieval, and LLM evidence analysis remain unimplemented.
+
+## Feature 3 — Evidence extraction and provenance foundation (2026-10-07)
+
+### Implementation
+
+- Extended the existing `evidence` and `claim_evidence` schema; migration `006_evidence_provenance.sql` adds explicit evidence/document links, exact evidence spans, evidence/source provenance, evidence-to-evidence lineage, source-specific claim/evidence relationships, identity keys, extraction metadata, and indexes.
+- Evidence types reuse the existing project enum, including official statements, satellite imagery, geospatial data, video, photographs, documents, flight/ship/radar tracking, eyewitness reports, physical evidence, OSINT analysis, and OTHER.
+- The deterministic extractor recognizes only explicit bounded evidence references. It preserves source spans, provider/reference IDs when present, directness (`DIRECT`, `REPORTED`, `DERIVED`, `UNKNOWN`), attribution, publication context, and relationship cues. Negative/no-confirmation references stay `INCONCLUSIVE`.
+- Exact explicit evidence IDs are reused across reports. Reuters/AP/BBC fixture documents with `IMG-2026-A77` point to one evidence row; `IMG-2026-A78` stays separate. Two generic “satellite imagery” descriptions without identifiers do not merge. A cited publisher is linked to a particular document only when the exact evidence identity matches; otherwise the publisher citation remains without a guessed article target.
+- OSINT analysis linked to geospatial evidence in a sentence is stored as derived from that evidence. `GET /documents/{document_id}/evidence` returns evidence metadata, source text spans, document relationships, directness, attribution, origin/cited sources, lineage, and claim/evidence relations.
+
+### Verification
+
+- Full host suite: 30 passed, 3 database/API integration tests skipped because host Python has no configured database URL or `httpx`. The 3 skipped tests were run successfully in the API container against the live PostgreSQL service and HTTP API, including Feature 2 claim persistence regression.
+- Migration 006 applied to the existing database, and migrations 001–006 applied in sequence to a disposable clean database. The seven expected evidence/provenance tables are present; the temporary database was dropped.
+- Database-backed checks verified exact span slicing, shared explicit identity across three documents, separate distinct identity, non-merging of unreferenced generic descriptions, all four persisted claim/evidence relations, source-specific claim relationships, CITES document resolution for a matching identity, DERIVED_FROM lineage, and idempotent reprocessing. The temporary HTTP API document/source/evidence fixture was deleted and direct SQL confirmed no fixture document, source, or evidence remained.
+- Python compilation, Compose configuration, and `git diff --check` passed. API health returned `ok`; OpenAPI contains `GET /documents/{document_id}/evidence`; the dashboard returned HTTP 200 after a frontend build.
+- Extractor-only timings on the checked-in fixture: 100 documents 0.0439 s (0.439 ms/doc), 500 documents 0.2188 s (0.438 ms/doc), and 1,000 documents 0.4336 s (0.434 ms/doc). These exclude database, network, and API costs.
+
+### Boundaries and limitations
+
+- Evidence extraction is deterministic and bounded; it can miss evidence forms outside its rule set. A report's source is not automatically treated as its evidence.
+- Evidence identity is conservative and requires an explicit identifier or URL. Similar descriptions, different URLs, or different publishers alone do not establish identity or independence.
+- Provenance/lineage is an independence foundation, not a final independence score. Unknown origins and unresolved citations remain explicit/unknown.
+- Claim/evidence relationship cues are bounded; ambiguous multi-evidence or multi-claim sentences remain `INCONCLUSIVE`. An official statement never automatically supports the underlying event claim.
+- Truth confidence, contradiction detection, incident/event resolution, embeddings, and LLM analysis are not implemented.
 
 - The collector stores one reported headline claim per new source document. Exact URL/content duplicates are reused, but differently worded coverage is not yet resolved into a shared Incident. New documents currently create separate Event Threads and Incidents.
-- Evidence extraction, source-independence grouping, logical contradiction persistence, explainable confidence calculations, importance calculations, and material-change resolution remain incomplete.
+- Source-independence scoring, logical contradiction persistence, explainable confidence calculations, importance calculations, and material-change resolution remain incomplete.
 - Historical search/reuse/contextual interpretation and India exposure graph/hypothesis workflows have schema/API foundations only; no automatic graph relevance, causal investigation, or observations are currently produced.
 - Ollama supports citation-validated event Q&A only. Embedding generation/retrieval, cache invalidation, grounded summaries, and what-to-watch generation remain incomplete.
 - The 50-report, separate-incidents/shared-thread, unrelated-semantic-events, source-copy independence, historical reuse, India causality, feed-failure, and startup catch-up end-to-end acceptance scenarios were not run.

@@ -39,7 +39,7 @@ Build a local-first intelligence system that turns public source material into t
 - [x] Read full supplied V1 specification and record architecture/product constraints here.
 - [x] Milestone 1: Compose, PostgreSQL/pgvector schema and reproducible migrations, health checks, environment example.
 - [x] Milestone 2 foundation: configurable RSS feed list, repeat-safe document ingestion, collection-run audit and URL/exact-content deduplication. Structured normalization/resolution is still outstanding.
-- [ ] Milestone 3: entity/claim/evidence models and deterministic extraction/provenance (entity persistence, aliases, mentions, bounded claim extraction, source spans, entity links, and document debugging APIs implemented; evidence extraction remains outstanding).
+- [x] Milestone 3: entity/claim/evidence models and deterministic extraction/provenance (entity aliases/mentions, structured claims/spans/entity links, evidence/source spans, claim/evidence relations, and document debugging APIs implemented; identity reuse is explicit-reference only and independence is a provenance foundation).
 - [ ] Milestone 4: structured fingerprint candidate retrieval and incident/event resolution; no vector-only merges.
 - [ ] Milestone 5: contradiction, confidence, importance, and material-update rules.
 - [ ] Milestone 6: shared canonical history and contextual interpretations.
@@ -54,7 +54,7 @@ Build a local-first intelligence system that turns public source material into t
 
 - Use SQL migrations checked into `backend/migrations`, applied once at API/worker startup under a PostgreSQL advisory lock; all schema changes remain reviewable SQL.
 - Keep source collection adapters behind a small Python protocol and seed only a short configurable RSS set. Collector runs can continue when individual feeds fail.
-- Initial ingestion continues to record a source-reported headline claim and now also runs bounded deterministic entity and structured claim extraction. This extractor preserves source spans and epistemic status; it does not assess truth. Event Q&A uses Ollama behind the provider boundary and rejects answers without valid stored-claim citations.
+- Initial ingestion records a source-reported headline claim and runs bounded deterministic entity, claim, and evidence extraction. Evidence remains distinct from its reporting source/document; explicit external evidence IDs may be reused across documents, while unresolved references stay separate. Exact source spans, directness, attribution, and lineage remain queryable; extraction does not assess truth. Event Q&A uses Ollama behind the provider boundary and rejects answers without valid stored-claim citations.
 - Preserve source excerpts conservatively and store URLs/metadata/hashes by default; adapters may retain only the excerpt needed for analysis.
 - Run API and periodic collection in one container process for V1, with separate Compose service commands so API availability does not depend on an Ollama call.
 

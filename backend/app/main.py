@@ -128,6 +128,87 @@ async def document_claims(document_id: UUID):
     return {"document_id": document_id, "source_id": document[0]["source_id"], "published_at": document[0]["published_at"], "claims": claims}
 
 
+@app.get("/documents/{document_id}/evidence")
+async def document_evidence(document_id: UUID):
+    document = await fetch_all(
+        "SELECT d.id,d.source_id,d.title,d.published_at,s.name source_name FROM documents d "
+        "JOIN sources s ON s.id=d.source_id WHERE d.id=%s", (document_id,),
+    )
+    if not document:
+        raise HTTPException(404, "document not found")
+    records = await fetch_all(
+        "SELECT e.id,e.type,e.description,e.canonical_url,e.provenance,e.observed_at,e.directness,e.independence_key,"
+        "e.metadata,e.extraction_method,e.extraction_confidence,e.identity_key,e.origin_reference,e.origin_source_id,"
+        "e.created_at,e.updated_at,ed.relation document_relation,ed.directness document_directness,"
+        "ed.attribution document_attribution,ed.metadata document_metadata,ed.referenced_document_id,"
+        "rd.title referenced_document_title,rd.canonical_url referenced_document_url,rs.name referenced_document_source "
+        "FROM evidence_documents ed JOIN evidence e ON e.id=ed.evidence_id "
+        "LEFT JOIN documents rd ON rd.id=ed.referenced_document_id LEFT JOIN sources rs ON rs.id=rd.source_id "
+        "WHERE ed.document_id=%s "
+        "ORDER BY e.created_at,e.id", (document_id,),
+    )
+    ids = [row["id"] for row in records]
+    spans = await fetch_all(
+        "SELECT evidence_id,text_field,character_start,character_end,source_text FROM evidence_source_spans "
+        "WHERE document_id=%s ORDER BY text_field,character_start", (document_id,),
+    ) if ids else []
+    sources = await fetch_all(
+        "SELECT es.evidence_id,es.relation,es.reference_text,s.id source_id,s.name source_name "
+        "FROM evidence_sources es JOIN sources s ON s.id=es.source_id WHERE es.evidence_id=ANY(%s) "
+        "ORDER BY s.name", (ids,),
+    ) if ids else []
+    lineage = await fetch_all(
+        "SELECT l.evidence_id,l.related_evidence_id,l.relation,l.reference_text,"
+        "child.type child_type,child.description child_description,parent.type parent_type,parent.description parent_description "
+        "FROM evidence_lineage l JOIN evidence child ON child.id=l.evidence_id JOIN evidence parent ON parent.id=l.related_evidence_id "
+        "WHERE l.evidence_id=ANY(%s) OR l.related_evidence_id=ANY(%s) ORDER BY l.created_at", (ids, ids),
+    ) if ids else []
+    claims = await fetch_all(
+        "SELECT ces.evidence_id,ces.relation,c.id claim_id,c.type claim_type,c.statement "
+        "FROM claim_evidence_sources ces JOIN claims c ON c.id=ces.claim_id "
+        "WHERE ces.document_id=%s ORDER BY c.created_at,c.id", (document_id,),
+    )
+    spans_by, sources_by, lineage_by, claims_by = {}, {}, {}, {}
+    for row in spans:
+        spans_by.setdefault(row["evidence_id"], []).append({k: v for k, v in row.items() if k != "evidence_id"})
+    for row in sources:
+        sources_by.setdefault(row["evidence_id"], []).append({k: v for k, v in row.items() if k != "evidence_id"})
+    for row in lineage:
+        if row["evidence_id"] in ids:
+            lineage_by.setdefault(row["evidence_id"], []).append({
+                "direction": "DERIVED_OR_CITES", "evidence_id": row["related_evidence_id"],
+                "type": row["parent_type"], "description": row["parent_description"],
+                "relation": row["relation"], "reference_text": row["reference_text"],
+            })
+        if row["related_evidence_id"] in ids:
+            lineage_by.setdefault(row["related_evidence_id"], []).append({
+                "direction": "USED_BY_OR_CITED_BY", "evidence_id": row["evidence_id"],
+                "type": row["child_type"], "description": row["child_description"],
+                "relation": row["relation"], "reference_text": row["reference_text"],
+            })
+    for row in claims:
+        claims_by.setdefault(row["evidence_id"], []).append({k: v for k, v in row.items() if k != "evidence_id"})
+    evidence_by_id = {}
+    for row in records:
+        item = evidence_by_id.setdefault(row["id"], {k: v for k, v in row.items() if k not in {"document_relation", "document_directness", "document_attribution", "document_metadata", "referenced_document_id", "referenced_document_title", "referenced_document_url", "referenced_document_source"}})
+        item.setdefault("document_links", []).append({
+            "relation": row["document_relation"], "directness": row["document_directness"],
+            "attribution": row["document_attribution"], "metadata": row["document_metadata"],
+            "referenced_document_id": row["referenced_document_id"],
+            "referenced_document_title": row["referenced_document_title"],
+            "referenced_document_url": row["referenced_document_url"],
+            "referenced_document_source": row["referenced_document_source"],
+        })
+    for evidence_id, item in evidence_by_id.items():
+        item["source_spans"] = spans_by.get(evidence_id, [])
+        item["sources"] = sources_by.get(evidence_id, [])
+        item["lineage"] = lineage_by.get(evidence_id, [])
+        item["claims"] = claims_by.get(evidence_id, [])
+    return {"document_id": document_id, "source_id": document[0]["source_id"],
+            "source_name": document[0]["source_name"], "published_at": document[0]["published_at"],
+            "evidence": list(evidence_by_id.values())}
+
+
 @app.get("/events")
 async def events(section: str = Query("all", pattern="^(all|india|global|other)$"), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     where = {"india": "india_relevance > 0", "global": "india_relevance = 0 AND importance_level >= 2", "other": "india_relevance = 0 AND importance_level < 2"}.get(section, "TRUE")
