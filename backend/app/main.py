@@ -79,6 +79,20 @@ async def health():
         raise HTTPException(503, detail=f"database unavailable: {type(exc).__name__}")
 
 
+@app.get("/documents/{document_id}/entities")
+async def document_entities(document_id: UUID):
+    rows = await fetch_all(
+        "SELECT m.id mention_id,m.surface_text,m.text_field,m.character_start,m.character_end,m.entity_type,"
+        "m.extraction_method,m.resolution_confidence,e.id entity_id,e.canonical_name,e.type canonical_type,e.country_code "
+        "FROM documents d LEFT JOIN document_entity_mentions m ON m.document_id=d.id "
+        "LEFT JOIN entities e ON e.id=m.entity_id WHERE d.id=%s "
+        "ORDER BY m.text_field,m.character_start", (document_id,)
+    )
+    if not rows:
+        raise HTTPException(404, "document not found")
+    return {"document_id": document_id, "mentions": [r for r in rows if r["mention_id"] is not None]}
+
+
 @app.get("/events")
 async def events(section: str = Query("all", pattern="^(all|india|global|other)$"), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     where = {"india": "india_relevance > 0", "global": "india_relevance = 0 AND importance_level >= 2", "other": "india_relevance = 0 AND importance_level < 2"}.get(section, "TRUE")

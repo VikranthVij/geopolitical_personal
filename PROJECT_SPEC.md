@@ -39,7 +39,7 @@ Build a local-first intelligence system that turns public source material into t
 - [x] Read full supplied V1 specification and record architecture/product constraints here.
 - [x] Milestone 1: Compose, PostgreSQL/pgvector schema and reproducible migrations, health checks, environment example.
 - [x] Milestone 2 foundation: configurable RSS feed list, repeat-safe document ingestion, collection-run audit and URL/exact-content deduplication. Structured normalization/resolution is still outstanding.
-- [ ] Milestone 3: entity/claim/evidence models and deterministic extraction/provenance.
+- [ ] Milestone 3: entity/claim/evidence models and deterministic extraction/provenance (entity persistence, alias handling, mentions, and document debugging API implemented; claim/evidence extraction remains outstanding).
 - [ ] Milestone 4: structured fingerprint candidate retrieval and incident/event resolution; no vector-only merges.
 - [ ] Milestone 5: contradiction, confidence, importance, and material-update rules.
 - [ ] Milestone 6: shared canonical history and contextual interpretations.

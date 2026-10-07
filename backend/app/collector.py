@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 
 from .default_feeds import FEEDS, RETIRED_FEED_NAMES, is_relevant_iaea
 from .intelligence import canonicalize_url, content_hash
+from .entities import persist_document_mentions
 
 
 async def ensure_feeds(pool: AsyncConnectionPool) -> None:
@@ -77,6 +78,7 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                         if not doc:
                             skipped += 1
                             continue
+                        await persist_document_mentions(conn, doc["id"], title, excerpt)
                         if previous:
                             await conn.execute("INSERT INTO claim_sources(claim_id,document_id,provenance_note) SELECT c.id,%s,'Exact content hash match; same underlying report.' FROM claims c WHERE c.incident_id=%s ON CONFLICT DO NOTHING", (doc["id"], previous["incident_id"]))
                             skipped += 1

@@ -33,6 +33,14 @@ Six unit tests pass for URL canonicalization, whitespace-stable content hashes, 
 - The old failed run remains in audit history as evidence of feed failure handling; current enabled feeds are successful.
 - Ollama's local API is not listening on port 11434. The installed `ollama list` CLI crashes during Metal/MLX initialization (`NSRangeException`, array index 0 on an empty array), so model-backed Q&A safely falls back to an unavailable-provider response.
 
+## Feature 1 — Structured entity extraction (2026-10-07)
+
+- Migration `004_structured_entities.sql` applied successfully to the existing database; API health stayed `ok`, and the document entity endpoint is present in OpenAPI.
+- 14 backend tests pass, including entity aliases, type separation, repeated mentions, conservative ambiguous resolution, malformed/empty/long input, Unicode punctuation, and the original regression suite. Python compile, Compose config, and whitespace checks pass.
+- A temporary document fixture was written, extracted twice, read through `GET /documents/{id}/entities`, and removed. The API returned exact title/excerpt offsets, one shared United States ID for `U.S.` and `United States`, and an unresolved Washington mention. Direct DB inspection showed no duplicate mentions; 3 canonical entities and 11 aliases remained from the fixture, with no fixture documents/mentions retained.
+- CPU-only deterministic extraction: 100 docs 0.032 s; 500 docs 0.152 s; 1,000 docs 0.302 s for a representative title+excerpt pair. This excludes database writes and live feed ingestion.
+- The complete migration chain (001–004) also passed against a separately created empty database; that temporary database was dropped afterward. A full automatic DB-backed test is not part of the unit suite yet.
+
 ## Acceptance gaps
 
 - The collector stores one reported headline claim per new source document. Exact URL/content duplicates are reused, but differently worded coverage is not yet resolved into a shared Incident. New documents currently create separate Event Threads and Incidents.
