@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 from .default_feeds import FEEDS, RETIRED_FEED_NAMES, is_relevant_iaea
 from .intelligence import canonicalize_url, content_hash
 from .entities import persist_document_mentions
+from .claims import persist_document_claims
 
 
 async def ensure_feeds(pool: AsyncConnectionPool) -> None:
@@ -81,6 +82,7 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                         await persist_document_mentions(conn, doc["id"], title, excerpt)
                         if previous:
                             await conn.execute("INSERT INTO claim_sources(claim_id,document_id,provenance_note) SELECT c.id,%s,'Exact content hash match; same underlying report.' FROM claims c WHERE c.incident_id=%s ON CONFLICT DO NOTHING", (doc["id"], previous["incident_id"]))
+                            await persist_document_claims(conn, doc["id"])
                             skipped += 1
                             continue
                         inserted += 1
@@ -92,6 +94,7 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                         claim = await (await conn.execute("INSERT INTO claims(incident_id,statement,type,status,confidence,confidence_explanation) VALUES(%s,%s,'OCCURRENCE','REPORTED','UNVERIFIED','A source reported this; independent evidence has not been assessed.') RETURNING id", (incident["id"], title))).fetchone()
                         await conn.execute("INSERT INTO claim_sources(claim_id,document_id) VALUES(%s,%s) ON CONFLICT DO NOTHING", (claim["id"], doc["id"]))
                         await conn.execute("INSERT INTO event_updates(event_thread_id,incident_id,change_type,summary,material) VALUES(%s,%s,'DISCOVERY',%s,true)", (event["id"], incident["id"], title))
+                        await persist_document_claims(conn, doc["id"])
                 totals["inserted"] += inserted
                 totals["skipped"] += skipped
                 async with pool.connection() as conn:

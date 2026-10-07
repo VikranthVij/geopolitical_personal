@@ -43,8 +43,42 @@ Six unit tests pass for URL canonicalization, whitespace-stable content hashes, 
 
 ## Acceptance gaps
 
+## Feature 2 — Structured claim extraction (2026-10-07)
+
+### Implementation
+
+- Added a replaceable `ClaimExtractor` protocol with a deterministic rule implementation. No LLM, cloud service, embedding, or new runtime dependency is used.
+- The collector persists extracted claims after entity mention persistence and incident assignment. Exact-content duplicate documents reuse the existing incident while receiving document-specific claim source links/spans.
+- Migration `005_structured_claims.sql` extends existing claims and adds `claim_source_spans` and `claim_entities`; it does not create a parallel claims table.
+- `GET /documents/{document_id}/claims` exposes claim type, exact statement, status, unverified truth confidence, extraction confidence/method, epistemic status, attribution, normalized fields, exact source spans, and entity links.
+- Supported deterministic rules cover the nine project claim types. Negation and explicit denials stay distinct from affirmed occurrence claims; reported/attributed assertions remain labelled; quantities retain operators and qualitative wording; time expressions are never given a date without source precision.
+- Within a document, only candidates with identical normalized predicate, polarity, epistemic/intent, and attribution signatures collapse. The original spans are retained. Lexical paraphrases remain separate rather than being semantically merged.
+
+### Pass 1 — Automated
+
+- 26 host unit/regression tests passed. The DB integration test was skipped in the host environment because it has no database URL; it was run separately in the API container and passed.
+- Python compilation, `docker compose config -q`, and `git diff --check` passed.
+- Migrations 001–005 applied to the current database and a separate empty temporary database. The temporary database was dropped after validation.
+
+### Pass 2 — Integration and database inspection
+
+- A rollback-only PostgreSQL integration test created a document, persisted Feature 1 entities/mentions, extracted claims, source spans, and entity links, then processed the same document again. Claim and span counts stayed unchanged; negated claims remained negated.
+- A separate temporary fixture was committed, read through `GET /documents/{id}/claims`, inspected directly in PostgreSQL, and removed. The API returned 8 structured claims for the fixture: occurrence, attribution, quantitative, time, and denial/response records. Actor/object/target links pointed at canonical entities. Direct inspection found 8 source spans and zero duplicate span keys. The fixture source/document/event were confirmed absent after cleanup.
+- The rebuilt API started successfully and migration 005 is present in `schema_migrations`.
+
+### Pass 3 — Adversarial
+
+- Tests cover negated occurrence/response/status, mixed-predicate negation scope, denials, “no evidence” language, direct vs attributed assertions, Reuters reporting chains, possible/uncertain language, reported and speculative intent, exact/approximate/ranged/qualitative quantities, exact/low-precision temporal expressions, passive voice, multiple predicates, repeated exact claims, lexical paraphrases, and “at least” false-location prevention.
+- Bugs found and fixed during this pass: noun “strike” produced a false event predicate; “at least” could be misread as a location; a modal/negated status could be recorded as affirmed; distinct “launched” and “fired” predicates collapsed; qualitative quantities lost their unit; passive subjects could be assigned as actors; and an outer Reuters attribution was initially flattened. Regression tests now cover these cases.
+
+### Performance and limitations
+
+- CPU-only extraction for the checked-in multi-sentence fixture took 0.193 s / 100 documents (1.929 ms per document), 0.892 s / 500 (1.785 ms/doc), and 1.759 s / 1,000 (1.759 ms/doc). These figures exclude database writes, feeds, and API serialization. Peak transient memory was small in this fixture run; timings are host-specific.
+- This is bounded rule-based extraction, not general language understanding. It may miss unlisted predicates, entities, complex coreference, cross-sentence argument links, and intricate reporting grammar. Temporal normalization deliberately leaves weekday/relative expressions unresolved without a safe reference date. It does not merge semantic paraphrases. Extraction confidence is not claim truth confidence; the latter remains `UNVERIFIED`.
+- Evidence extraction/independence, contradictions, truth confidence, importance, incident/event resolution, historical/India analysis, retrieval, and LLM analysis remain unimplemented.
+
 - The collector stores one reported headline claim per new source document. Exact URL/content duplicates are reused, but differently worded coverage is not yet resolved into a shared Incident. New documents currently create separate Event Threads and Incidents.
-- Structured entity/claim/evidence extraction, source-independence grouping, logical contradiction persistence, explainable confidence calculations, importance calculations, and material-change resolution remain incomplete.
+- Evidence extraction, source-independence grouping, logical contradiction persistence, explainable confidence calculations, importance calculations, and material-change resolution remain incomplete.
 - Historical search/reuse/contextual interpretation and India exposure graph/hypothesis workflows have schema/API foundations only; no automatic graph relevance, causal investigation, or observations are currently produced.
 - Ollama supports citation-validated event Q&A only. Embedding generation/retrieval, cache invalidation, grounded summaries, and what-to-watch generation remain incomplete.
 - The 50-report, separate-incidents/shared-thread, unrelated-semantic-events, source-copy independence, historical reuse, India causality, feed-failure, and startup catch-up end-to-end acceptance scenarios were not run.

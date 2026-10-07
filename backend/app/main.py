@@ -93,6 +93,41 @@ async def document_entities(document_id: UUID):
     return {"document_id": document_id, "mentions": [r for r in rows if r["mention_id"] is not None]}
 
 
+@app.get("/documents/{document_id}/claims")
+async def document_claims(document_id: UUID):
+    document = await fetch_all("SELECT id,source_id,published_at FROM documents WHERE id=%s", (document_id,))
+    if not document:
+        raise HTTPException(404, "document not found")
+    claims = await fetch_all(
+        "SELECT c.id,c.type,c.statement,c.status,c.confidence,c.confidence_explanation,c.intent_label,"
+        "c.normalized_representation,c.polarity,c.epistemic_status,c.attribution_type,c.attribution,"
+        "c.extraction_method,c.extraction_confidence,c.created_at "
+        "FROM claims c JOIN claim_sources cs ON cs.claim_id=c.id WHERE cs.document_id=%s ORDER BY c.created_at,c.id",
+        (document_id,),
+    )
+    claim_ids = [c["id"] for c in claims]
+    spans = await fetch_all(
+        "SELECT claim_id,text_field,character_start,character_end,source_text FROM claim_source_spans "
+        "WHERE document_id=%s ORDER BY character_start", (document_id,),
+    ) if claim_ids else []
+    entities = await fetch_all(
+        "SELECT ce.claim_id,ce.role,e.id entity_id,e.canonical_name,e.type entity_type "
+        "FROM claim_entities ce JOIN entities e ON e.id=ce.entity_id "
+        "JOIN claim_sources cs ON cs.claim_id=ce.claim_id WHERE cs.document_id=%s ORDER BY e.canonical_name",
+        (document_id,),
+    ) if claim_ids else []
+    spans_by_claim = {}
+    entities_by_claim = {}
+    for span in spans:
+        spans_by_claim.setdefault(span["claim_id"], []).append({k: v for k, v in span.items() if k != "claim_id"})
+    for entity in entities:
+        entities_by_claim.setdefault(entity["claim_id"], []).append({k: v for k, v in entity.items() if k != "claim_id"})
+    for claim in claims:
+        claim["source_spans"] = spans_by_claim.get(claim["id"], [])
+        claim["entities"] = entities_by_claim.get(claim["id"], [])
+    return {"document_id": document_id, "source_id": document[0]["source_id"], "published_at": document[0]["published_at"], "claims": claims}
+
+
 @app.get("/events")
 async def events(section: str = Query("all", pattern="^(all|india|global|other)$"), limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     where = {"india": "india_relevance > 0", "global": "india_relevance = 0 AND importance_level >= 2", "other": "india_relevance = 0 AND importance_level < 2"}.get(section, "TRUE")
