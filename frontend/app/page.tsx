@@ -8,7 +8,7 @@ type Row = Record<string, string | number | null>;
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function Home() {
-  const [section, setSection] = useState("india");
+  const [section, setSection] = useState("all");
   const [events, setEvents] = useState<EventItem[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
