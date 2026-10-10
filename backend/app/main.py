@@ -323,6 +323,8 @@ async def event_detail(event_id: UUID):
         raise HTTPException(404, "event not found")
     result = rows[0]
     result["incidents"] = await fetch_all("SELECT * FROM incidents WHERE event_thread_id=%s ORDER BY occurred_at NULLS LAST,created_at", (event_id,))
+    result["contradictions"] = await fetch_all("SELECT x.id,x.type,x.explanation,x.status,x.scope,x.method,a.statement claim_a,b.statement claim_b FROM contradictions x JOIN claims a ON a.id=x.claim_a JOIN claims b ON b.id=x.claim_b WHERE x.event_thread_id=%s ORDER BY x.created_at DESC", (event_id,))
+    result["material_changes"] = await fetch_all("SELECT id,trigger_incident_id,change_type,previous_state,new_state,reason,significance,created_at FROM material_changes WHERE event_thread_id=%s ORDER BY created_at DESC", (event_id,))
     return result
 
 
@@ -371,7 +373,48 @@ async def changes(event_id: UUID):
 
 @app.get("/events/{event_id}/contradictions")
 async def contradictions(event_id: UUID):
-    return await fetch_all("SELECT x.id,x.type,x.explanation,x.status,a.id claim_a_id,a.statement claim_a,b.id claim_b_id,b.statement claim_b FROM incidents i JOIN claims a ON a.incident_id=i.id JOIN contradictions x ON x.claim_a=a.id OR x.claim_b=a.id JOIN claims b ON b.id=CASE WHEN x.claim_a=a.id THEN x.claim_b ELSE x.claim_a END WHERE i.event_thread_id=%s ORDER BY x.created_at DESC", (event_id,))
+    return await fetch_all("SELECT x.id,x.type,x.explanation,x.status,x.scope,x.method,x.incident_id,x.event_thread_id,a.id claim_a_id,a.statement claim_a,b.id claim_b_id,b.statement claim_b FROM contradictions x JOIN claims a ON a.id=x.claim_a JOIN claims b ON b.id=x.claim_b WHERE x.event_thread_id=%s ORDER BY x.created_at DESC", (event_id,))
+
+
+@app.get("/claims/{claim_id}/contradictions")
+async def claim_contradictions(claim_id: UUID):
+    if not await fetch_all("SELECT id FROM claims WHERE id=%s", (claim_id,)):
+        raise HTTPException(404, "claim not found")
+    return await fetch_all("SELECT x.*,CASE WHEN x.claim_a=%s THEN b.id ELSE a.id END other_claim_id,CASE WHEN x.claim_a=%s THEN b.statement ELSE a.statement END other_statement FROM contradictions x JOIN claims a ON a.id=x.claim_a JOIN claims b ON b.id=x.claim_b WHERE x.claim_a=%s OR x.claim_b=%s ORDER BY x.created_at DESC", (claim_id,claim_id,claim_id,claim_id))
+
+
+@app.get("/claims/{claim_id}/confidence")
+async def claim_confidence(claim_id: UUID):
+    rows = await fetch_all("SELECT id,statement,type,confidence,confidence_explanation,confidence_basis,updated_at FROM claims WHERE id=%s", (claim_id,))
+    if not rows:
+        raise HTTPException(404, "claim not found")
+    result = rows[0]
+    result["supporting_evidence"] = await fetch_all("SELECT e.id,e.type,e.description,e.strength,e.directness,e.independence_key,e.origin_reference,e.origin_source_id,ce.relation FROM claim_evidence ce JOIN evidence e ON e.id=ce.evidence_id WHERE ce.claim_id=%s ORDER BY e.created_at", (claim_id,))
+    result["source_documents"] = await fetch_all("SELECT d.id document_id,d.title,d.canonical_url,d.published_at,s.name source_name,s.tier source_tier,s.source_type,s.metadata source_metadata FROM claim_sources cs JOIN documents d ON d.id=cs.document_id JOIN sources s ON s.id=d.source_id WHERE cs.claim_id=%s ORDER BY d.published_at DESC NULLS LAST", (claim_id,))
+    return result
+
+
+@app.get("/incidents/{incident_id}/importance")
+async def incident_importance(incident_id: UUID):
+    rows = await fetch_all("SELECT id,title,importance_level,importance FROM incidents WHERE id=%s", (incident_id,))
+    if not rows:
+        raise HTTPException(404, "incident not found")
+    return rows[0]
+
+
+@app.get("/event-threads/{event_thread_id}/importance")
+async def event_thread_importance(event_thread_id: UUID):
+    rows = await fetch_all("SELECT id,title,importance_category,importance_level,importance FROM event_threads WHERE id=%s", (event_thread_id,))
+    if not rows:
+        raise HTTPException(404, "event thread not found")
+    return rows[0]
+
+
+@app.get("/event-threads/{event_thread_id}/material-changes")
+async def event_thread_material_changes(event_thread_id: UUID):
+    if not await fetch_all("SELECT id FROM event_threads WHERE id=%s", (event_thread_id,)):
+        raise HTTPException(404, "event thread not found")
+    return await fetch_all("SELECT id,trigger_incident_id,change_type,previous_state,new_state,reason,significance,created_at FROM material_changes WHERE event_thread_id=%s ORDER BY created_at DESC", (event_thread_id,))
 
 
 @app.get("/events/{event_id}/related")

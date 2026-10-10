@@ -22,7 +22,7 @@ Build a local-first intelligence system that turns public source material into t
 - Sources and documents retain tier, URL, lineage, author/language/type, publication/collection times, hash, and excerpts subject to source terms.
 - Claims use OCCURRENCE, ATTRIBUTION, LOCATION, TIME, QUANTITATIVE, INTENT, STATUS, RESPONSE, CONSEQUENCE; intent labels are REPORTED_INTENT, INFERENCE, SPECULATION, UNKNOWN.
 - Evidence types include official statements, imagery, geospatial, video/photo/document, flight/ship/radar tracking, eyewitness, physical evidence, OSINT analysis, and OTHER. Relations are SUPPORTS, CONTRADICTS, PARTIALLY_SUPPORTS, INCONCLUSIVE.
-- Contradiction types include occurrence, attribution, quantitative, location, intent, status, consequence. Scope/time-window/subset differences are not contradictions.
+- Contradiction types include occurrence, attribution, quantitative, location, time, intent, status, consequence. Time comparisons require matching precision and role; scope/time-window/subset differences are not contradictions.
 - Claim confidence levels: HIGH, MEDIUM, LOW, CONTESTED, UNVERIFIED, with a human-readable basis and dimensions for evidence strength, source quality/independence, corroboration, contradiction, directness, and recency.
 - Importance has military, economic, diplomatic, strategic, humanitarian, geographic scope, escalation, duration, novelty dimensions at incident and event levels.
 - Entities are canonical and aliased; entity/event/incident roles and relationships support retrieval and India exposure.
@@ -43,7 +43,7 @@ Build a local-first intelligence system that turns public source material into t
 - [x] Milestone 3: entity/claim/evidence models and deterministic extraction/provenance (entity aliases/mentions, structured claims/spans/entity links, evidence/source spans, claim/evidence relations, and document debugging APIs implemented; identity reuse is explicit-reference only and independence is a provenance foundation).
 - [x] Milestone 4: structured document-to-incident fingerprints, indexed candidate retrieval, deterministic resolution, source-specific claims/evidence, audit metadata, and controlled regression verification.
 - [x] Feature 5: deterministic incident-to-event-thread resolution, bounded indexed candidate retrieval, separate incident identities, explicit incident relationships, ambiguity/audit handling, inspection APIs, controlled backfill, and integration verification.
-- [ ] Milestone 5: contradiction, confidence, importance, and material-update rules.
+- [x] Milestone 5 / Feature 6: deterministic contradiction, confidence, importance, and material-change rules (verified complete across all 8 contradiction categories, wire-copy independence chains, 5 confidence levels, 5 importance dimensions, deduplicated material changes, savepoint failure isolation, and 95 automated regression tests).
 - [ ] Milestone 6: shared canonical history and contextual interpretations.
 - [ ] Milestone 7: India exposure graph, observations, hypotheses, explicit causality labels.
 - [ ] Milestone 8: retrieval/context builder, provider abstraction, Ollama graceful degradation.

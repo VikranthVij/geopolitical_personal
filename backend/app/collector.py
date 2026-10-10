@@ -10,13 +10,14 @@ import httpx
 from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Jsonb
 
-from .default_feeds import FEEDS, RETIRED_FEED_NAMES, is_relevant_iaea
+from .default_feeds import FEEDS, RETIRED_FEED_NAMES, UNAVAILABLE_FEEDS, is_relevant_iaea
 from .intelligence import canonicalize_url, content_hash
 from .entities import persist_document_mentions
 from .claims import persist_document_claims
 from .evidence import persist_document_evidence
 from .incident_resolution import resolve_document, build_document_fingerprint, persist_fingerprint
 from .event_thread_resolution import resolve_incident_to_thread, record_thread_resolution_failure
+from .feature6 import run_feature6
 
 
 async def ensure_feeds(pool: AsyncConnectionPool) -> None:
@@ -25,9 +26,18 @@ async def ensure_feeds(pool: AsyncConnectionPool) -> None:
             await conn.execute("UPDATE source_feeds f SET enabled=false FROM sources s WHERE f.source_id=s.id AND s.name=%s", (name,))
             await conn.execute("UPDATE sources SET enabled=false WHERE name=%s", (name,))
         for name, url, tier, category in FEEDS:
-            source = await conn.execute("INSERT INTO sources(name,base_url,tier,source_type) VALUES(%s,%s,%s,'PUBLISHER') ON CONFLICT(name) DO UPDATE SET base_url=EXCLUDED.base_url,enabled=true RETURNING id", (name, url, tier))
+            aggregated = name == "Reuters via Google News RSS"
+            source_type = "AGGREGATOR" if aggregated else "PUBLISHER"
+            metadata = Jsonb({"publisher_attribution": "Reuters", "collection_method": "Google News RSS; aggregator, not an official Reuters feed"} if aggregated else {})
+            source = await conn.execute("INSERT INTO sources(name,base_url,tier,source_type,metadata) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(name) DO UPDATE SET base_url=EXCLUDED.base_url,source_type=EXCLUDED.source_type,metadata=EXCLUDED.metadata,enabled=true RETURNING id", (name, url, tier, source_type, metadata))
             source_id = (await source.fetchone())["id"]
             await conn.execute("INSERT INTO source_feeds(source_id,url,category) VALUES(%s,%s,%s) ON CONFLICT(url) DO UPDATE SET enabled=true", (source_id, url, category))
+        for name, url, tier, category, source_type, reason in UNAVAILABLE_FEEDS:
+            source = await (await conn.execute("INSERT INTO sources(name,base_url,tier,source_type,enabled,metadata) VALUES(%s,%s,%s,%s,false,%s) "
+                "ON CONFLICT(name) DO UPDATE SET base_url=EXCLUDED.base_url,source_type=EXCLUDED.source_type,enabled=false,metadata=EXCLUDED.metadata RETURNING id",
+                (name, url, tier, source_type, Jsonb({"automation_status": "UNAVAILABLE_AUTOMATION", "verification_note": reason})))).fetchone()
+            await conn.execute("INSERT INTO source_feeds(source_id,url,category,enabled) VALUES(%s,%s,%s,false) ON CONFLICT(url) DO UPDATE SET enabled=false",
+                               (source["id"], url, category))
 
 
 def clean_text(value: str) -> str:
@@ -91,6 +101,13 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                             await persist_fingerprint(conn, previous["incident_id"], fp, extras)
                             await conn.execute("INSERT INTO document_incident_resolutions(document_id,incident_id,state,resolution_method,match_strength,matched_signals,candidates_considered) VALUES(%s,%s,'MATCHED_EXISTING','EXACT_CONTENT_HASH','STRONG',%s,'[]') ON CONFLICT(document_id) DO UPDATE SET incident_id=EXCLUDED.incident_id,state=EXCLUDED.state,resolution_method=EXCLUDED.resolution_method,match_strength=EXCLUDED.match_strength,matched_signals=EXCLUDED.matched_signals,updated_at=now()",
                                                (doc["id"], previous["incident_id"], Jsonb([{"signal": "exact_content_hash", "value": digest}])))
+                            target = await (await conn.execute("SELECT event_thread_id FROM incidents WHERE id=%s", (previous["incident_id"],))).fetchone()
+                            if target:
+                                try:
+                                    async with conn.transaction():
+                                        await run_feature6(conn, previous["incident_id"], target["event_thread_id"], doc["id"])
+                                except Exception as exc:
+                                    await conn.execute("INSERT INTO feature6_failures(document_id,incident_id,stage,error) VALUES(%s,%s,'INGESTION',%s)", (doc["id"], previous["incident_id"], f"{type(exc).__name__}: {str(exc)[:300]}"))
                             skipped += 1
                             continue
                         # A provisional incident satisfies the existing FK contract while Features 1–3 run.
@@ -121,6 +138,13 @@ async def collect_once(pool: AsyncConnectionPool) -> dict:
                                 await resolve_incident_to_thread(conn, resolved_incident_id)
                         except Exception as thread_error:
                             await record_thread_resolution_failure(conn, resolved_incident_id, thread_error)
+                        target = await (await conn.execute("SELECT event_thread_id FROM incidents WHERE id=%s", (resolved_incident_id,))).fetchone()
+                        if target:
+                            try:
+                                async with conn.transaction():
+                                    await run_feature6(conn, resolved_incident_id, target["event_thread_id"], doc["id"])
+                            except Exception as exc:
+                                await conn.execute("INSERT INTO feature6_failures(document_id,incident_id,stage,error) VALUES(%s,%s,'INGESTION',%s)", (doc["id"], resolved_incident_id, f"{type(exc).__name__}: {str(exc)[:300]}"))
                         inserted += 1
                 totals["inserted"] += inserted
                 totals["skipped"] += skipped
