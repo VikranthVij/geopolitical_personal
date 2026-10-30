@@ -7,6 +7,8 @@ import re
 
 from psycopg.types.json import Jsonb
 
+from .claim_semantics import assertion_semantics
+
 TYPES = {"OCCURRENCE", "ATTRIBUTION", "QUANTITATIVE", "LOCATION", "TIME", "INTENT", "STATUS", "CONSEQUENCE"}
 
 
@@ -164,8 +166,42 @@ async def _refresh_claims(conn, incident_id):
                             "method": "PROVENANCE_RULES_V1"}), row["id"]))
 
 
-def _importance(text: str, incident_count: int = 1) -> tuple[str, int, dict]:
+def _military_escalation_support(claims: list[dict]) -> list[dict]:
+    support = []
+    for claim in claims:
+        text = claim.get("statement", "") or ""
+        # An attack mentioned as the object of a response belongs to the earlier
+        # incident. It does not establish execution by the response subject.
+        subject_text = re.split(r"\b(?:in response to|in retaliation for|responded to|because of|caused by|after|following)\b",
+                                text, maxsplit=1, flags=re.I)[0]
+        semantics = assertion_semantics({**claim, "statement": subject_text})
+        if claim.get("type", "OCCURRENCE") not in {"OCCURRENCE", "CONSEQUENCE", "RESPONSE", "STATUS"}:
+            continue
+        if semantics not in {"ACTUAL_OCCURRENCE", "REPORTED_OCCURRENCE"}:
+            continue
+        if not re.search(r"\b(?:attack(?:s|ed|ing)?|strikes?|struck|missiles?|military|forces|troops|conflict|nuclear|retaliat\w*|escalat\w*)\b", subject_text, re.I):
+            continue
+        # Execution alone is not escalation: routine deployment, exercises and
+        # an unspecified "military action" do not establish offensive activity.
+        if re.search(r"\b(?:exercise|training|routine)\b", subject_text, re.I):
+            continue
+        if not re.search(r"\b(?:attack(?:s|ed|ing)?|strikes?|struck|retaliat\w*|escalat\w*|direct conflict|new front)\b", subject_text, re.I):
+            continue
+        if not (re.search(r"\b(?:launched|attacked|struck|fired|deployed|retaliated|escalated|occurred|killed)\b", subject_text, re.I)
+                or re.search(r"\breports? of\b[^.;!?]{0,80}\b(?:attack|strike|deployment)\b", subject_text, re.I)):
+            continue
+        support.append({"claim_id": str(claim["id"]) if claim.get("id") else None,
+                        "source_text": text, "semantics": semantics,
+                        "attribution": claim.get("attribution") or {},
+                        "source_spans": claim.get("source_spans") or []})
+    return support
+
+
+def _importance(text: str, incident_count: int = 1, claims: list[dict] | None = None) -> tuple[str, int, dict]:
     t = text.casefold()
+    assessed = claims if claims is not None else [{"statement": text}]
+    escalation_support = _military_escalation_support(assessed)
+    semantics = sorted({assertion_semantics(c) for c in assessed})
     dimensions = {
         "military": "HIGH" if any(x in t for x in ("strike", "missile", "attack", "troops", "military", "war", "armed forces")) else "LOW",
         "economic": "HIGH" if any(x in t for x in ("oil", "shipping", "sanction", "trade", "energy", "market")) else "LOW",
@@ -173,7 +209,7 @@ def _importance(text: str, incident_count: int = 1) -> tuple[str, int, dict]:
         "strategic": "HIGH" if any(x in t for x in ("strategic", "nuclear", "national security", "alliance", "sovereignty")) else "LOW",
         "humanitarian": "HIGH" if any(x in t for x in ("killed", "casualt", "civilian", "displaced", "humanitarian")) else "LOW",
         "geographic_scope": "REGIONAL" if any(x in t for x in ("regional", "across", "multiple countries", "strait")) else "LOCAL",
-        "escalation": "HIGH" if any(x in t for x in ("retaliat", "escalat", "widen", "new front", "direct conflict")) else "LOW",
+        "escalation": "HIGH" if escalation_support else "LOW",
         "duration": "ONGOING" if incident_count > 1 else "SINGLE_REPORT",
         "novelty": "ELEVATED" if any(x in t for x in ("first time", "unprecedented", "first direct")) else "UNKNOWN",
     }
@@ -181,7 +217,11 @@ def _importance(text: str, incident_count: int = 1) -> tuple[str, int, dict]:
     score = high_count + min(max(incident_count - 1, 0), 2)
     level = "CRITICAL" if high_count >= 4 else "HIGH" if score >= 3 else "MEDIUM" if score >= 1 else "LOW"
     explanation = f"{high_count} of the assessed impact dimensions are elevated; aggregation also considers {incident_count} linked incident(s)."
-    return level, min(score, 5), {"level": level, "dimensions": dimensions, "reason": explanation, "method": "RULES_V1"}
+    explanation += " Assertion semantics: " + ", ".join(semantics) + "."
+    if not escalation_support:
+        explanation += " No executed military escalation is established by the available claims; plans, threats and decisions remain important context."
+    return level, min(score, 5), {"level": level, "dimensions": dimensions, "reason": explanation,
+        "assertion_semantics": semantics, "military_escalation_support": escalation_support, "method": "RULES_V1"}
 
 
 def _candidate_bucket(claim: dict) -> tuple:
@@ -235,7 +275,8 @@ def candidate_pairs(claims: list[dict], per_claim: int = 20, total_limit: int = 
 async def run_feature6(conn, incident_id, event_thread_id, document_id=None):
     """Recompute claim assessments, bounded same-thread candidate pairs and importance."""
     claims = await (await conn.execute(
-        "SELECT c.id,c.incident_id,c.type,c.statement,c.normalized_representation,c.polarity,c.intent_label "
+        "SELECT c.id,c.incident_id,c.type,c.statement,c.normalized_representation,c.polarity,c.intent_label,c.status,c.epistemic_status,c.attribution, "
+        "COALESCE((SELECT jsonb_agg(jsonb_build_object('document_id',sp.document_id,'text_field',sp.text_field,'character_start',sp.character_start,'character_end',sp.character_end,'source_text',sp.source_text)) FROM claim_source_spans sp WHERE sp.claim_id=c.id),'[]'::jsonb) source_spans "
         "FROM claims c JOIN incidents i ON i.id=c.incident_id WHERE i.event_thread_id=%s ORDER BY c.created_at,c.id LIMIT 1000",
         (event_thread_id,))).fetchall()
     # Reassessment must withdraw earlier pairings that no longer meet current scope rules.
@@ -257,29 +298,41 @@ async def run_feature6(conn, incident_id, event_thread_id, document_id=None):
     await _refresh_claims(conn, incident_id)
     row = await (await conn.execute("SELECT title,summary,importance_level,importance FROM incidents WHERE id=%s", (incident_id,))).fetchone()
     n = await (await conn.execute("SELECT count(*) n FROM incidents WHERE event_thread_id=%s", (event_thread_id,))).fetchone()
-    level, numeric, basis = _importance(f"{row['title']} {row['summary'] or ''}", n["n"])
+    incident_claims = [c for c in claims if c["incident_id"] == incident_id]
+    level, numeric, basis = _importance(f"{row['title']} {row['summary'] or ''}", 1, incident_claims)
     await conn.execute("UPDATE incidents SET importance=%s,importance_level=%s,updated_at=now() WHERE id=%s", (Jsonb(basis), level, incident_id))
     thread = await (await conn.execute("SELECT string_agg(coalesce(title,'')||' '||coalesce(summary,''),' ') text FROM incidents WHERE event_thread_id=%s", (event_thread_id,))).fetchone()
-    thread_level, thread_numeric, thread_basis = _importance(thread["text"] or "", n["n"])
+    thread_level, thread_numeric, thread_basis = _importance(thread["text"] or "", n["n"], claims)
     prior_thread = await (await conn.execute("SELECT importance,importance_category FROM event_threads WHERE id=%s", (event_thread_id,))).fetchone()
     await conn.execute("UPDATE event_threads SET importance=%s,importance_category=%s,importance_level=%s,updated_at=now() WHERE id=%s",
                        (Jsonb(thread_basis), thread_level, thread_numeric, event_thread_id))
     ranks = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
     if prior_thread and (prior_thread["importance"] or {}).get("method") == "RULES_V1" and ranks[thread_level] > ranks.get(prior_thread["importance_category"], 0):
-        incident_text = f"{row['title']} {row['summary'] or ''}".casefold()
         triggers = (
-            ("MILITARY_ESCALATION", ("escalat", "retaliat", "new front", "direct conflict", "widened the conflict")),
             ("ECONOMIC_CONSEQUENCE", ("shipping disruption", "strait closed", "oil supply disrupted", "new sanctions")),
             ("DIPLOMATIC_SHIFT", ("ceasefire collapsed", "talks suspended", "ambassador recalled", "treaty withdrawn")),
             ("HUMANITARIAN_CONSEQUENCE", ("mass displacement", "mass casualties", "humanitarian emergency")),
         )
-        change_type = next((kind for kind, terms in triggers if any(term in incident_text for term in terms)), None)
+        escalation_support = _military_escalation_support(incident_claims)
+        change_type = "MILITARY_ESCALATION" if escalation_support else None
+        change_support = escalation_support
+        if not change_type:
+            for kind, terms in triggers:
+                support = [c for c in incident_claims if
+                    assertion_semantics(c) in {"ACTUAL_OCCURRENCE", "REPORTED_OCCURRENCE"}
+                    and any(term in (c.get("statement") or "").casefold() for term in terms)]
+                if support:
+                    change_type = kind
+                    change_support = [{"claim_id": str(c["id"]), "source_text": c["statement"],
+                        "semantics": assertion_semantics(c), "attribution": c.get("attribution") or {},
+                        "source_spans": c.get("source_spans") or []} for c in support]
+                    break
         if change_type:
             key = hashlib.sha256(f"{event_thread_id}:importance-rise:{thread_level}:{change_type}".encode()).hexdigest()
             await conn.execute("INSERT INTO material_changes(event_thread_id,trigger_incident_id,change_type,previous_state,new_state,reason,significance,dedupe_key) "
                 "VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(dedupe_key) DO NOTHING",
-                (event_thread_id, incident_id, change_type, Jsonb({"importance": prior_thread["importance_category"]}), Jsonb({"importance": thread_level}),
-                 f"Event Thread importance rose from {prior_thread['importance_category']} to {thread_level} alongside an explicit {change_type.replace('_', ' ').lower()} signal.", thread_level, key))
+                (event_thread_id, incident_id, change_type, Jsonb({"importance": prior_thread["importance_category"]}), Jsonb({"importance": thread_level, "supporting_claims": change_support}),
+                 f"Event Thread importance rose from {prior_thread['importance_category']} to {thread_level} alongside a reported {change_type.replace('_', ' ').lower()} signal supported by stored claims.", thread_level, key))
     # A newly introduced country or organization actor in an existing thread is material.
     context = await (await conn.execute("SELECT actor_entity_ids,participant_entity_ids,location_entity_ids FROM incident_thread_contexts WHERE incident_id=%s", (incident_id,))).fetchone()
     if context and n["n"] > 1:

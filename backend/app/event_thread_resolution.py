@@ -7,10 +7,12 @@ from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
+from .claim_semantics import assertion_semantics
 
 
-RESOLVER_METHOD = "DETERMINISTIC_STRUCTURED_THREAD_V1"
-RESOLVER_VERSION = "thread-v1"
+
+RESOLVER_METHOD = "DETERMINISTIC_STRUCTURED_THREAD_V3"
+RESOLVER_VERSION = "thread-v3"
 MAX_CANDIDATES = 50
 CONTINUITY_WINDOW = timedelta(days=30)
 
@@ -31,6 +33,8 @@ class IncidentThreadContext:
     relationship_cues: tuple[dict, ...] = ()
     source_document_ids: tuple[UUID, ...] = ()
     multi_occurrence_review: bool = False
+    report_published_at: datetime | None = None
+    source_claims: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,8 @@ class EventThreadCandidate:
     latest_incident_at: datetime | None
     incident_count: int
     members: tuple[IncidentThreadContext, ...] = ()
+    latest_reported_at: datetime | None = None
+    members_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -94,37 +100,38 @@ def _candidate_signals(context: IncidentThreadContext, candidate: EventThreadCan
     if shared_domains:
         matches.append({"signal": "context_domain", "domains": sorted(shared_domains)})
     temporal = _time_relation(context, candidate)
-    matches.append({"signal": "temporal_continuity", "relation": temporal,
-                    "precision": context.time_precision or "UNKNOWN"})
+    report_temporal = "UNKNOWN"
+    if temporal == "UNKNOWN" and context.report_published_at and candidate.latest_reported_at:
+        gap = abs(context.report_published_at - candidate.latest_reported_at)
+        report_temporal = "NEAR" if gap <= CONTINUITY_WINDOW else "DISTANT"
+        matches.append({"signal": "reporting_time_continuity", "relation": report_temporal,
+                        "basis": "source publication dates; occurrence time remains unknown"})
+    else:
+        matches.append({"signal": "temporal_continuity", "relation": temporal,
+                        "precision": context.time_precision or "UNKNOWN"})
     if context.domains and candidate.domains and not shared_domains:
         conflicts.append({"signal": "context_domain", "incident_domains": sorted(context.domains),
                           "thread_domains": sorted(candidate.domains)})
-    elif temporal == "DISTANT":
+    elif temporal == "DISTANT" and context.event_time_start and candidate.latest_incident_at:
         conflicts.append({"signal": "temporal_gap", "days": round(abs(context.event_time_start - candidate.latest_incident_at).total_seconds() / 86400, 2)})
 
-    # Relationship cues are explicit source language, not inferred causality.
-    for cue in context.relationship_cues:
-        cue_relation = cue.get("relation")
-        if cue_relation not in {"CAUSED_BY", "RESPONDED_TO", "ESCALATED_FROM", "INFLUENCED_BY"}:
-            continue
-        if shared_participants:
-            relation = cue
-            matches.append({"signal": "explicit_incident_relationship", "relation": cue_relation,
-                            "source_claim_id": str(cue.get("claim_id")) if cue.get("claim_id") else None,
-                            "shared_entity_ids": sorted(map(str, shared_participants))})
-            break
-
-    explicit = relation is not None
-    # Two involved canonical entities plus a shared structured context and near temporal placement
-    # establish situation continuity. Geography and time by themselves are never sufficient.
-    contextual = len(shared_participants) >= 2 and bool(shared_domains) and temporal == "NEAR"
-    # One shared participant can connect a new entrant only when source claims explicitly say it
-    # supports, responds to, or is influenced by this existing situation.
-    explicit_contextual = explicit and bool(shared_domains) and bool(shared_participants)
-    eligible = explicit_contextual or contextual
-    if explicit and not shared_domains:
-        # Explicit response can cross topical domains, but require more than a bare common actor.
-        eligible = len(shared_participants) >= 2
+    # A cue is only a retrieval hint until its object identifies one member.
+    grounded = _grounded_relationships(context, candidate.members) if candidate.members_complete else []
+    if len(grounded) == 1:
+        relation = grounded[0]
+        matches.append({"signal": "explicit_incident_relationship", **relation,
+                        "source_claim_id": relation.get("claim_id"),
+                        "shared_entity_ids": sorted(map(str, shared_participants))})
+    elif context.relationship_cues:
+        conflicts.append({"signal": "relationship_target_unresolved",
+                          "candidate_member_ids": [str(m.incident_id) for m in candidate.members],
+                          "grounded_target_ids": [r["target_incident_id"] for r in grounded],
+                          "members_complete": candidate.members_complete,
+                          "source_cues": list(context.relationship_cues)})
+    # Shared entities/domain/time retrieve plausible situations, but cannot prove
+    # a relationship to a particular occurrence or proposition.
+    eligible = relation is not None and bool(shared_participants) and (
+        bool(shared_domains) or len(shared_participants) >= 2)
     return matches, conflicts, eligible, relation
 
 
@@ -134,25 +141,28 @@ class DeterministicEventThreadCandidateRetriever:
     async def retrieve(self, conn, context: IncidentThreadContext) -> list[EventThreadCandidate]:
         rows = await (await conn.execute(
             "SELECT p.event_thread_id,e.title,p.actor_entity_ids,p.participant_entity_ids,p.target_entity_ids,"
-            "p.location_entity_ids,p.context_domains,p.started_at,p.latest_incident_at,p.incident_count "
+            "p.location_entity_ids,p.context_domains,p.started_at,p.latest_incident_at,p.incident_count,p.latest_reported_at "
             "FROM event_thread_profiles p JOIN event_threads e ON e.id=p.event_thread_id "
             "WHERE p.event_thread_id<>%s AND ("
             "p.actor_entity_ids && %s::uuid[] OR p.participant_entity_ids && %s::uuid[] OR "
             "p.target_entity_ids && %s::uuid[] OR p.location_entity_ids && %s::uuid[] OR "
             "p.context_domains && %s::text[] OR "
-            "(%s::timestamptz IS NOT NULL AND p.latest_incident_at BETWEEN %s::timestamptz - interval '30 days' AND %s::timestamptz + interval '30 days')) "
-            "ORDER BY p.latest_incident_at DESC NULLS LAST LIMIT %s",
+            "(%s::timestamptz IS NOT NULL AND p.latest_incident_at BETWEEN %s::timestamptz - interval '30 days' AND %s::timestamptz + interval '30 days') OR "
+            "(%s::timestamptz IS NOT NULL AND p.latest_reported_at BETWEEN %s::timestamptz - interval '30 days' AND %s::timestamptz + interval '30 days')) "
+            "ORDER BY COALESCE(p.latest_incident_at,p.latest_reported_at) DESC NULLS LAST,p.event_thread_id LIMIT %s",
             (context.current_thread_id, list(context.actor_ids), list(context.participant_ids), list(context.target_ids),
              list(context.location_ids), list(context.domains), context.event_time_start, context.event_time_start,
-             context.event_time_start, self.limit),
+             context.event_time_start, context.report_published_at, context.report_published_at,
+             context.report_published_at, self.limit),
         )).fetchall()
         result = []
         for row in rows:
+            members, complete = await _relationship_members(conn, row["event_thread_id"])
             result.append(EventThreadCandidate(
                 row["event_thread_id"], row["title"], frozenset(row["actor_entity_ids"] or []),
                 frozenset(row["participant_entity_ids"] or []), frozenset(row["target_entity_ids"] or []),
                 frozenset(row["location_entity_ids"] or []), frozenset(row["context_domains"] or []),
-                row["started_at"], row["latest_incident_at"], row["incident_count"], ()))
+                row["started_at"], row["latest_incident_at"], row["incident_count"], members, row["latest_reported_at"], complete))
         return result
 
 
@@ -199,22 +209,78 @@ def _domain_for(action: str | None, statements: list[str], entity_types: set[str
     return domains
 
 
+def _reference_text(text: str) -> str:
+    # Exact proposition reference normalization, not similarity scoring.
+    return " ".join(re.findall(r"\w+", text.casefold())).removeprefix("the ").removeprefix("a ")
+
+
 def _relationship_cues(claims: list[dict]) -> tuple[dict, ...]:
     output = []
     patterns = (
-        ("RESPONDED_TO", re.compile(r"\b(?:in response to|respond(?:ed|s|ing) to|retaliat\w*(?:\s+in response)?(?:\s+to)?|in retaliation for)\b", re.I)),
-        ("CAUSED_BY", re.compile(r"\b(?:caused by|because of)\b", re.I)),
-        ("ESCALATED_FROM", re.compile(r"\b(?:escalat\w+ (?:after|following|from))\b", re.I)),
-        ("INFLUENCED_BY", re.compile(r"\b(?:influenced by|to support|in support of)\b", re.I)),
+        ("RESPONDED_TO", r"in response to|respond(?:ed|s|ing) to|in retaliation for|retaliated (?:against|for)"),
+        ("CAUSED_BY", r"caused by|because of"),
+        ("ESCALATED_FROM", r"escalat\w+ (?:after|following|from)|(?:a|one|\d+) days? after"),
+        ("INFLUENCED_BY", r"influenced by|in support of|to support"),
+        ("RESPONDED_TO", r"retaliat\w*"),
     )
     for claim in claims:
-        statement = claim["statement"] or ""
-        for relation, pattern in patterns:
-            match = pattern.search(statement)
-            if match:
-                output.append({"relation": relation, "claim_id": str(claim["id"]), "source_text": statement[:500]})
-                break
+        statement = claim.get("statement") or ""
+        for relation, expression in patterns:
+            match = re.search(r"\b(?:" + expression + r")\b", statement, re.I)
+            if not match:
+                continue
+            # Keep the actual complement, not the entire surrounding article.
+            end = re.search(r"[.;!?]|,|\b(?:while|whereas|although)\b", statement[match.end():], re.I)
+            stop = match.end() + end.start() if end else len(statement)
+            raw_target = statement[match.end():stop]
+            target = raw_target.strip(" :\"'“”")
+            start = match.end() + len(raw_target) - len(raw_target.lstrip(" :\"'“”"))
+            remainder = statement[stop:]
+            multiple_targets = bool(remainder.startswith(",") and re.search(
+                r"^,\s*(?:the|a|an|another|and|or)\b|\b(?:and|or|both|either)\b",
+                remainder.split(".")[0], re.I))
+            output.append({"relation": relation, "claim_id": str(claim["id"]),
+                           "source_text": statement, "cue": match.group(),
+                           "cue_start": match.start(), "cue_end": match.end(),
+                           "target_text": target, "target_start": start, "target_end": start + len(target),
+                           "multiple_targets_possible": multiple_targets,
+                           "semantics": assertion_semantics(claim),
+                           "epistemic_status": claim.get("epistemic_status"),
+                           "polarity": claim.get("polarity", "AFFIRMED"),
+                           "attribution": claim.get("attribution") or {},
+                           "source_spans": claim.get("source_spans", [])})
+            break
     return tuple(output)
+
+
+def _grounded_relationships(context: IncidentThreadContext, members) -> list[dict]:
+    targets = {}
+    for cue in context.relationship_cues:
+        if cue.get("semantics") not in {"ACTUAL_OCCURRENCE", "REPORTED_OCCURRENCE", "DECISION"}:
+            continue
+        if cue.get("multiple_targets_possible"):
+            continue
+        reference = _reference_text(cue.get("target_text", ""))
+        # Generic tensions/retaliation, pronouns and multiple target references
+        # cannot identify a target. Exact multiword proposition references only.
+        if len(reference.split()) < 3 or re.search(r"\b(?:and|or|either|both|tensions|developments|concerns|there|previous|earlier)\b", reference):
+            continue
+        for member in members:
+            # A candidate claim may itself refer to some other incident. Match
+            # its asserted subject, never a reference in its context/object.
+            subjects = []
+            for claim in member.source_claims:
+                subject = re.split(r"\b(?:in response to|responded to|in retaliation for|because of|caused by|amid|alongside|during|following|after)\b",
+                                   claim.get("statement", ""), maxsplit=1, flags=re.I)[0]
+                if assertion_semantics({**claim, "statement": subject}) in {"ACTUAL_OCCURRENCE", "REPORTED_OCCURRENCE", "DECISION"}:
+                    subjects.append(_reference_text(subject))
+            if reference == _reference_text(member.title) or any(
+                    (" " + reference + " ") in (" " + subject + " ") for subject in subjects):
+                targets.setdefault((str(member.incident_id), cue["relation"]), {**cue, "target_incident_id": str(member.incident_id),
+                    "subject_incident_id": str(context.incident_id),
+                    "source_document_ids": list(map(str, context.source_document_ids)),
+                    "target_basis": "Exact explicit occurrence/proposition reference in a candidate member"})
+    return list(targets.values())
 
 
 async def build_incident_context(conn, incident_id: UUID) -> IncidentThreadContext:
@@ -229,10 +295,12 @@ async def build_incident_context(conn, incident_id: UUID) -> IncidentThreadConte
         "SELECT DISTINCT e.id,e.type,ie.role FROM incident_entities ie JOIN entities e ON e.id=ie.entity_id WHERE ie.incident_id=%s",
         (incident_id,))).fetchall()
     claims = await (await conn.execute(
-        "SELECT DISTINCT c.id,c.statement,c.normalized_representation FROM claims c WHERE c.incident_id=%s", (incident_id,))).fetchall()
+        "SELECT c.id,c.statement,c.normalized_representation,c.type,c.polarity,c.status,c.epistemic_status,c.intent_label,         COALESCE((SELECT jsonb_agg(jsonb_build_object('document_id',sp.document_id,'text_field',sp.text_field,         'character_start',sp.character_start,'character_end',sp.character_end,'source_text',sp.source_text))         FROM claim_source_spans sp WHERE sp.claim_id=c.id),'[]'::jsonb) source_spans         FROM claims c WHERE c.incident_id=%s ORDER BY c.created_at,c.id", (incident_id,))).fetchall()
     documents = await (await conn.execute(
         "SELECT DISTINCT document_id FROM claim_sources WHERE claim_id IN (SELECT id FROM claims WHERE incident_id=%s)",
         (incident_id,))).fetchall()
+    report_date = await (await conn.execute(
+        "SELECT max(published_at) latest_published_at FROM documents WHERE incident_id=%s", (incident_id,))).fetchone()
     actor_ids = {r["id"] for r in rows if r["role"] == "ACTOR"}
     target_ids = {r["id"] for r in rows if r["role"] == "TARGET"}
     location_ids = {r["id"] for r in rows if r["role"] == "LOCATION"}
@@ -252,13 +320,20 @@ async def build_incident_context(conn, incident_id: UUID) -> IncidentThreadConte
                        if (c["normalized_representation"] or {}).get("action")), None)
     domains = _domain_for(action, statements, entity_types)
     cues = _relationship_cues(claims)
+    # Feature 4's AMBIGUOUS state means document-to-incident identity is uncertain;
+    # it does not mean that the article contains multiple occurrences. Only the
+    # explicit decomposition limitation should block incident-to-thread resolution.
     review = await (await conn.execute(
         "SELECT 1 FROM documents d JOIN document_incident_resolutions r ON r.document_id=d.id "
-        "WHERE d.incident_id=%s AND r.state IN ('REVIEW_REQUIRED','AMBIGUOUS') LIMIT 1", (incident_id,))).fetchone()
+        "WHERE d.incident_id=%s AND ("
+        "starts_with(r.limitation,'Multiple distinct occurrence predicates were detected') OR "
+        "COALESCE((SELECT (fp.source_metadata->>'multi_occurrence_possible')::boolean "
+        "FROM incident_fingerprints fp WHERE fp.incident_id=d.incident_id),false)) LIMIT 1",
+        (incident_id,))).fetchone()
     return IncidentThreadContext(incident["id"], incident["event_thread_id"], incident["title"],
         frozenset(actor_ids), frozenset(participants), frozenset(target_ids), frozenset(location_ids),
         frozenset(domains), incident["event_time_start"], incident["event_time_end"], incident["time_precision"],
-        cues, tuple(r["document_id"] for r in documents), bool(review))
+        cues, tuple(r["document_id"] for r in documents), bool(review), report_date["latest_published_at"], tuple(claims))
 
 
 async def _load_entity_names(conn, entity_ids: set[UUID]) -> list[str]:
@@ -269,9 +344,12 @@ async def _load_entity_names(conn, entity_ids: set[UUID]) -> list[str]:
     return countries or [r["canonical_name"] for r in rows if r["type"] in {"ORGANIZATION", "MILITARY_UNIT"}]
 
 
-def _thread_title(names: list[str], domains: set[str], thread_id: UUID) -> str:
+def _thread_title(names: list[str], domains: set[str], thread_id: UUID, source_title: str | None = None) -> str:
+    candidate = " ".join((source_title or "").split())
+    if candidate and len(candidate) <= 240 and not re.fullmatch(r"Event Thread [0-9a-f]{8}", candidate, re.I):
+        return candidate
     if not names:
-        return f"Event Thread {str(thread_id)[:8].upper()}"
+        return "Unclassified geopolitical event"
     participants = "–".join(names[:2])
     domain_title = {
         "MILITARY_SECURITY": "Military Escalation",
@@ -283,12 +361,14 @@ def _thread_title(names: list[str], domains: set[str], thread_id: UUID) -> str:
     return f"{participants} {label}"
 
 
-async def refresh_thread_profile(conn, event_thread_id: UUID) -> None:
+async def refresh_thread_profile(conn, event_thread_id: UUID, *, advance_activity: bool = True) -> None:
     summary = await (await conn.execute(
-        "SELECT count(*) incident_count,min(COALESCE(ctx.event_time_start,i.occurred_at)) started_at,"
-        "max(COALESCE(ctx.event_time_start,i.occurred_at)) latest_incident_at FROM incidents i "
-        "LEFT JOIN incident_thread_contexts ctx ON ctx.incident_id=i.id WHERE i.event_thread_id=%s",
-        (event_thread_id,))).fetchone()
+        "SELECT count(DISTINCT i.id) incident_count,min(COALESCE(ctx.event_time_start,i.occurred_at)) started_at,"
+        "max(COALESCE(ctx.event_time_start,i.occurred_at)) latest_incident_at,"
+        "max(i.occurred_at) latest_confirmed_occurrence_at,"
+        "(SELECT max(d.published_at) FROM incidents ir JOIN documents d ON d.incident_id=ir.id WHERE ir.event_thread_id=%s) latest_reported_at "
+        "FROM incidents i LEFT JOIN incident_thread_contexts ctx ON ctx.incident_id=i.id WHERE i.event_thread_id=%s",
+        (event_thread_id, event_thread_id))).fetchone()
     arrays = {}
     for key, column, element_type in (
         ("actors", "actor_entity_ids", "uuid"), ("participants", "participant_entity_ids", "uuid"),
@@ -301,18 +381,18 @@ async def refresh_thread_profile(conn, event_thread_id: UUID) -> None:
             f"CROSS JOIN LATERAL unnest(COALESCE(ctx.{column},ARRAY[]::{element_type}[])) AS u(value) "
             "WHERE i.event_thread_id=%s", (event_thread_id,))).fetchone()
     await conn.execute(
-        "INSERT INTO event_thread_profiles(event_thread_id,actor_entity_ids,participant_entity_ids,target_entity_ids,location_entity_ids,context_domains,started_at,latest_incident_at,incident_count) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(event_thread_id) DO UPDATE SET actor_entity_ids=EXCLUDED.actor_entity_ids,"
+        "INSERT INTO event_thread_profiles(event_thread_id,actor_entity_ids,participant_entity_ids,target_entity_ids,location_entity_ids,context_domains,started_at,latest_incident_at,incident_count,latest_reported_at) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(event_thread_id) DO UPDATE SET actor_entity_ids=EXCLUDED.actor_entity_ids,"
         "participant_entity_ids=EXCLUDED.participant_entity_ids,target_entity_ids=EXCLUDED.target_entity_ids,location_entity_ids=EXCLUDED.location_entity_ids,"
-        "context_domains=EXCLUDED.context_domains,started_at=EXCLUDED.started_at,latest_incident_at=EXCLUDED.latest_incident_at,incident_count=EXCLUDED.incident_count,updated_at=now()",
+        "context_domains=EXCLUDED.context_domains,started_at=EXCLUDED.started_at,latest_incident_at=EXCLUDED.latest_incident_at,incident_count=EXCLUDED.incident_count,latest_reported_at=EXCLUDED.latest_reported_at,updated_at=now()",
         (event_thread_id, arrays["actors"]["values"], arrays["participants"]["values"], arrays["targets"]["values"],
-         arrays["locations"]["values"], arrays["domains"]["values"], summary["started_at"], summary["latest_incident_at"], summary["incident_count"]))
+         arrays["locations"]["values"], arrays["domains"]["values"], summary["started_at"], summary["latest_incident_at"], summary["incident_count"], summary["latest_reported_at"]))
     await conn.execute(
-        "UPDATE event_threads SET started_at=%s,latest_activity_at=now(),thread_status=CASE "
+        "UPDATE event_threads SET started_at=%s,latest_activity_at=CASE WHEN %s AND %s::timestamptz IS NOT NULL THEN GREATEST(COALESCE(latest_activity_at,'-infinity'::timestamptz),%s) ELSE latest_activity_at END,thread_status=CASE "
         "WHEN %s=1 AND thread_status IN ('UNKNOWN','DEVELOPING','DORMANT') THEN 'DEVELOPING' "
         "WHEN %s>1 AND thread_status IN ('UNKNOWN','DEVELOPING','DORMANT') THEN 'ONGOING' ELSE thread_status END,"
         "status=CASE WHEN status='DISCOVERED' THEN 'DEVELOPING'::event_status ELSE status END,updated_at=now() WHERE id=%s",
-        (summary["started_at"], summary["incident_count"], summary["incident_count"], event_thread_id))
+        (summary["started_at"], advance_activity, summary["latest_confirmed_occurrence_at"], summary["latest_confirmed_occurrence_at"], summary["incident_count"], summary["incident_count"], event_thread_id))
 
 
 async def _persist_incident_context(conn, context: IncidentThreadContext) -> None:
@@ -328,20 +408,23 @@ async def _persist_incident_context(conn, context: IncidentThreadContext) -> Non
          Jsonb(list(context.relationship_cues)), list(context.source_document_ids)))
 
 
+async def _relationship_members(conn, thread_id: UUID):
+    # One bounded member query, not a full context rebuild per member/candidate.
+    rows = await (await conn.execute(
+        "SELECT i.id,i.title,COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'statement',c.statement)) "
+        "FROM claims c WHERE c.incident_id=i.id),'[]'::jsonb) source_claims "
+        "FROM incidents i WHERE i.event_thread_id=%s ORDER BY i.id LIMIT 51", (thread_id,))).fetchall()
+    return tuple(IncidentThreadContext(r["id"], thread_id, r["title"],
+        source_claims=tuple(r["source_claims"])) for r in rows[:50]), len(rows) <= 50
+
+
 async def _select_related_member(conn, context: IncidentThreadContext, thread_id: UUID) -> tuple[IncidentThreadContext | None, dict | None]:
-    row = await (await conn.execute(
-        "SELECT i.id FROM incidents i JOIN incident_thread_contexts ctx ON ctx.incident_id=i.id "
-        "WHERE i.event_thread_id=%s AND ctx.participant_entity_ids && %s::uuid[] "
-        "ORDER BY ctx.event_time_start DESC NULLS LAST,i.created_at DESC LIMIT 1",
-        (thread_id, list(context.participant_ids)))).fetchone()
-    if not row:
+    members, complete = await _relationship_members(conn, thread_id)
+    grounded = _grounded_relationships(context, members) if complete else []
+    if len(grounded) != 1:
         return None, None
-    related = await build_incident_context(conn, row["id"])
-    relation = next((cue for cue in context.relationship_cues if cue.get("relation") in
-                     {"CAUSED_BY", "RESPONDED_TO", "ESCALATED_FROM", "INFLUENCED_BY"}), None)
-    if relation:
-        return related, relation
-    return related, {"relation": "RELATED_TO", "evidence": "Shared participants, context domain, and temporal continuity supported thread membership."}
+    cue = grounded[0]
+    return next(m for m in members if str(m.incident_id) == cue["target_incident_id"]), cue
 
 
 async def _persist_audit(conn, incident_id, thread_id, state, matched, conflicts, candidates, relationship_ids, reason, attempt=1):
@@ -371,6 +454,16 @@ async def resolve_incident_to_thread(conn, incident_id: UUID, retriever: EventTh
         "FROM event_thread_resolution_audits a WHERE a.incident_id=%s AND a.resolver_version=%s AND a.state<>'RESOLUTION_FAILED' "
         "ORDER BY a.attempt DESC LIMIT 1", (incident_id, RESOLVER_VERSION))).fetchone()
     if existing:
+        # Reprocessing can attach new documents and better structured context to an
+        # already assigned incident. Refresh its profile without changing the audited
+        # assignment or advancing activity for a source copy alone.
+        context = await build_incident_context(conn, incident_id)
+        await _persist_incident_context(conn, context)
+        await refresh_thread_profile(conn, context.current_thread_id, advance_activity=False)
+        names = await _load_entity_names(conn, set(context.participant_ids))
+        await conn.execute(
+            "UPDATE event_threads SET title=%s WHERE id=%s AND (title ~* '^Event Thread [0-9a-f]{8}$' OR title ~* '^(?:.+ )?(?:Military Escalation|Maritime Security Situation|Diplomatic Engagement|Economic Relations|Geopolitical Situation)$')",
+            (_thread_title(names, set(context.domains), context.current_thread_id, context.title), context.current_thread_id))
         return ThreadResolution(existing["state"], existing["event_thread_id"], tuple(existing["matched_signals"] or []),
             tuple(existing["conflicts"] or []), tuple(existing["candidates_considered"] or []),
             tuple(existing["relationship_ids"] or []), existing["reason"])
@@ -380,8 +473,8 @@ async def resolve_incident_to_thread(conn, incident_id: UUID, retriever: EventTh
         result = ThreadResolution("REVIEW_REQUIRED", context.current_thread_id, reason="Feature 4 marked this incident for multi-occurrence review.")
         await _persist_incident_context(conn, context)
         names = await _load_entity_names(conn, set(context.participant_ids))
-        await conn.execute("UPDATE event_threads SET title=%s,thread_status='UNKNOWN',latest_activity_at=now(),updated_at=now() WHERE id=%s",
-                           (_thread_title(names, set(context.domains), context.current_thread_id), context.current_thread_id))
+        await conn.execute("UPDATE event_threads SET title=%s,thread_status='UNKNOWN',updated_at=now() WHERE id=%s",
+                           (_thread_title(names, set(context.domains), context.current_thread_id, context.title), context.current_thread_id))
         await refresh_thread_profile(conn, context.current_thread_id)
         await conn.execute("UPDATE event_threads SET thread_status='UNKNOWN' WHERE id=%s", (context.current_thread_id,))
         await _persist_audit(conn, incident_id, context.current_thread_id, result.state, [], [], [], [], result.reason)
@@ -395,9 +488,18 @@ async def resolve_incident_to_thread(conn, incident_id: UUID, retriever: EventTh
     if result.state == "ASSIGNED_EXISTING_THREAD":
         selected = next(candidate for candidate in candidates if candidate.event_thread_id == target_thread_id)
         related_member, cue = await _select_related_member(conn, context, selected.event_thread_id)
+        if not related_member:
+            # Revalidate at persistence: never choose the latest shared actor if
+            # evidence became ambiguous, including a custom resolver result.
+            result = ThreadResolution("REVIEW_REQUIRED", context.current_thread_id,
+                candidates_considered=result.candidates_considered,
+                reason="The selected relationship target could not be uniquely grounded at persistence.")
+            await _persist_audit(conn, incident_id, context.current_thread_id, result.state,
+                [], [], result.candidates_considered, [], result.reason)
+            return result
         if related_member:
             relation_type = cue.get("relation", "RELATED_TO")
-            evidence = {"source_claim_id": str(cue.get("claim_id")) if cue.get("claim_id") else None,
+            evidence = {**cue, "source_claim_id": str(cue.get("claim_id")) if cue.get("claim_id") else None,
                         "source_text": cue.get("source_text"), "matched_signals": list(result.matched_signals),
                         "relationship_basis": cue.get("evidence") or "Explicit source language supports this incident relationship."}
             row = await (await conn.execute(
@@ -412,8 +514,8 @@ async def resolve_incident_to_thread(conn, incident_id: UUID, retriever: EventTh
             await conn.execute("UPDATE incidents SET event_thread_id=%s,updated_at=now() WHERE id=%s", (target_thread_id, incident_id))
     else:
         names = await _load_entity_names(conn, set(context.participant_ids))
-        await conn.execute("UPDATE event_threads SET title=%s WHERE id=%s",
-                           (_thread_title(names, set(context.domains), target_thread_id), target_thread_id))
+        await conn.execute("UPDATE event_threads SET title=%s WHERE id=%s AND (title ~* '^Event Thread [0-9a-f]{8}$' OR title ~* '^(?:.+ )?(?:Military Escalation|Maritime Security Situation|Diplomatic Engagement|Economic Relations|Geopolitical Situation)$')",
+                           (_thread_title(names, set(context.domains), target_thread_id, context.title), target_thread_id))
 
     await refresh_thread_profile(conn, target_thread_id)
     old_thread = context.current_thread_id

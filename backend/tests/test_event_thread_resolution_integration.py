@@ -11,11 +11,101 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.event_thread_resolution import (
     DeterministicEventThreadCandidateRetriever,
+    refresh_thread_profile,
     resolve_incident_to_thread,
 )
 
 
 class EventThreadResolutionDatabaseTest(unittest.IsolatedAsyncioTestCase):
+    async def _ambiguous_document_context(self, conn, *, multi_occurrence: bool):
+        token = str(uuid.uuid4())
+        source = await (await conn.execute(
+            "INSERT INTO sources(name,tier) VALUES(%s,1) RETURNING id", ("Feature 4 ambiguity " + token,)
+        )).fetchone()
+        thread = await (await conn.execute(
+            "INSERT INTO event_threads(title) VALUES(%s) RETURNING id", ("Ambiguous incident " + token,)
+        )).fetchone()
+        incident = await (await conn.execute(
+            "INSERT INTO incidents(event_thread_id,title) VALUES(%s,%s) RETURNING id",
+            (thread["id"], "Ambiguous incident " + token),
+        )).fetchone()
+        document = await (await conn.execute(
+            "INSERT INTO documents(source_id,canonical_url,title,content_hash,incident_id) "
+            "VALUES(%s,%s,%s,%s,%s) RETURNING id",
+            (source["id"], f"https://example.invalid/ambiguous/{token}", "One unresolved report", token, incident["id"]),
+        )).fetchone()
+        limitation = ("Multiple distinct occurrence predicates were detected; the article-level incident model cannot safely split them, so this document is held for review."
+                     if multi_occurrence else
+                     "Article-level single-incident assignment; multi-occurrence decomposition is not available in the current document schema.")
+        await conn.execute(
+            "INSERT INTO document_incident_resolutions(document_id,incident_id,state,resolution_method,match_strength,limitation) "
+            "VALUES(%s,%s,'AMBIGUOUS','TEST','INSUFFICIENT',%s)",
+            (document["id"], incident["id"], limitation),
+        )
+        if multi_occurrence:
+            from psycopg.types.json import Jsonb
+            await conn.execute(
+                "INSERT INTO incident_fingerprints(incident_id,source_metadata) VALUES(%s,%s)",
+                (incident["id"], Jsonb({"multi_occurrence_possible": True})),
+            )
+        return incident["id"]
+
+    @unittest.skipUnless(os.getenv("EVENT_THREAD_TEST_DATABASE_URL"), "set EVENT_THREAD_TEST_DATABASE_URL for PostgreSQL acceptance tests")
+    async def test_feature4_ambiguous_single_occurrence_does_not_block_thread_resolution(self):
+        from psycopg import AsyncConnection
+        from psycopg.rows import dict_row
+
+        async with await AsyncConnection.connect(os.environ["EVENT_THREAD_TEST_DATABASE_URL"], row_factory=dict_row) as conn:
+            try:
+                incident_id = await self._ambiguous_document_context(conn, multi_occurrence=False)
+                result = await resolve_incident_to_thread(conn, incident_id)
+                self.assertEqual(result.state, "NEW_THREAD")
+            finally:
+                await conn.rollback()
+
+    @unittest.skipUnless(os.getenv("EVENT_THREAD_TEST_DATABASE_URL"), "set EVENT_THREAD_TEST_DATABASE_URL for PostgreSQL acceptance tests")
+    async def test_explicit_multi_occurrence_document_stays_held_for_review(self):
+        from psycopg import AsyncConnection
+        from psycopg.rows import dict_row
+
+        async with await AsyncConnection.connect(os.environ["EVENT_THREAD_TEST_DATABASE_URL"], row_factory=dict_row) as conn:
+            try:
+                incident_id = await self._ambiguous_document_context(conn, multi_occurrence=True)
+                result = await resolve_incident_to_thread(conn, incident_id)
+                self.assertEqual(result.state, "REVIEW_REQUIRED")
+                self.assertIn("multi-occurrence review", result.reason)
+            finally:
+                await conn.rollback()
+
+    @unittest.skipUnless(os.getenv("EVENT_THREAD_TEST_DATABASE_URL"), "set EVENT_THREAD_TEST_DATABASE_URL for PostgreSQL acceptance tests")
+    async def test_report_publication_does_not_advance_thread_event_activity(self):
+        from psycopg import AsyncConnection
+        from psycopg.rows import dict_row
+
+        async with await AsyncConnection.connect(os.environ["EVENT_THREAD_TEST_DATABASE_URL"], row_factory=dict_row) as conn:
+            try:
+                token = str(uuid.uuid4())
+                source = await (await conn.execute("INSERT INTO sources(name,tier) VALUES(%s,1) RETURNING id", ("Activity source " + token,))).fetchone()
+                thread = await (await conn.execute("INSERT INTO event_threads(title) VALUES(%s) RETURNING id", ("Activity thread " + token,))).fetchone()
+                incident = await (await conn.execute("INSERT INTO incidents(event_thread_id,title,occurred_at) VALUES(%s,%s,NULL) RETURNING id", (thread["id"], "Occurrence time unknown"))).fetchone()
+                await conn.execute(
+                    "INSERT INTO incident_thread_contexts(incident_id,event_time_start,time_precision) VALUES(%s,%s,'DAY')",
+                    (incident["id"], datetime(2027, 4, 7, tzinfo=timezone.utc)),
+                )
+                published = datetime(2026, 10, 2, tzinfo=timezone.utc)
+                await conn.execute(
+                    "INSERT INTO documents(source_id,canonical_url,title,content_hash,published_at,incident_id) "
+                    "VALUES(%s,%s,'Published report',%s,%s,%s)",
+                    (source["id"], f"https://example.invalid/activity/{token}", token, published, incident["id"]),
+                )
+                await refresh_thread_profile(conn, thread["id"])
+                activity = await (await conn.execute("SELECT latest_activity_at FROM event_threads WHERE id=%s", (thread["id"],))).fetchone()
+                profile = await (await conn.execute("SELECT latest_reported_at FROM event_thread_profiles WHERE event_thread_id=%s", (thread["id"],))).fetchone()
+                self.assertIsNone(activity["latest_activity_at"])
+                self.assertEqual(profile["latest_reported_at"], published)
+            finally:
+                await conn.rollback()
+
     @unittest.skipUnless(os.getenv("EVENT_THREAD_TEST_DATABASE_URL"), "set EVENT_THREAD_TEST_DATABASE_URL for PostgreSQL acceptance tests")
     async def test_five_incident_thread_relationships_false_merge_and_idempotence(self):
         from psycopg import AsyncConnection
@@ -33,12 +123,12 @@ class EventThreadResolutionDatabaseTest(unittest.IsolatedAsyncioTestCase):
                 base = datetime(2026, 10, 1, tzinfo=timezone.utc)
                 for index in range(5):
                     thread = await (await conn.execute("INSERT INTO event_threads(title) VALUES(%s) RETURNING id", (f"provisional {token} {index}",))).fetchone()
-                    incident = await (await conn.execute("INSERT INTO incidents(event_thread_id,title,occurred_at) VALUES(%s,%s,%s) RETURNING id", (thread["id"], f"incident {token} {index}", base + timedelta(hours=index * 5)))).fetchone()
+                    incident = await (await conn.execute("INSERT INTO incidents(event_thread_id,title,occurred_at) VALUES(%s,%s,%s) RETURNING id", (thread["id"], f"Military strike on Natanz wave {index} {token}", base + timedelta(hours=index * 5)))).fetchone()
                     for entity_id in participants:
                         await conn.execute("INSERT INTO incident_entities(incident_id,entity_id,role) VALUES(%s,%s,'MENTIONED')", (incident["id"], entity_id))
                     await conn.execute("INSERT INTO incident_fingerprints(incident_id,primary_actor_id,action_predicate,event_time_start,time_precision) VALUES(%s,%s,%s,%s,'EXACT')", (incident["id"], participants[index % 2], "strike" if index % 2 == 0 else "launch", base + timedelta(hours=index * 5)))
                     if index:
-                        claim = await (await conn.execute("INSERT INTO claims(incident_id,statement,type,status,confidence,confidence_explanation) VALUES(%s,%s,'RESPONSE','REPORTED','UNVERIFIED','fixture') RETURNING id", (incident["id"], "Iran retaliated in response to the previous Israeli strike."))).fetchone()
+                        claim = await (await conn.execute("INSERT INTO claims(incident_id,statement,type,status,confidence,confidence_explanation) VALUES(%s,%s,'RESPONSE','REPORTED','UNVERIFIED','fixture') RETURNING id", (incident["id"], f"Iran responded in response to the Military strike on Natanz wave {index - 1} {token}."))).fetchone()
                     incidents.append((incident["id"], thread["id"]))
 
                 results = []

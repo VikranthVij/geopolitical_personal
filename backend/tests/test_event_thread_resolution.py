@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.event_thread_resolution import (
     DeterministicEventThreadResolver, EventThreadCandidate, IncidentThreadContext,
-    _thread_title,
+    _relationship_cues, _thread_title,
 )
 
 
@@ -17,36 +17,43 @@ IRAN, ISRAEL, CHINA, RUSSIA, UKRAINE, NATANZ = [uuid4() for _ in range(6)]
 
 
 def incident(*, actor=IRAN, participants=(IRAN, ISRAEL), targets=(ISRAEL,), locations=(NATANZ,),
-             domains=("MILITARY_SECURITY",), when=NOW, cues=(), current=None):
-    return IncidentThreadContext(uuid4(), current or uuid4(), "fixture", frozenset((actor,)) if actor else frozenset(),
+             domains=("MILITARY_SECURITY",), when=NOW, cues=(), current=None, reported=None, title="fixture headline"):
+    return IncidentThreadContext(uuid4(), current or uuid4(), title, frozenset((actor,)) if actor else frozenset(),
         frozenset(participants), frozenset(targets), frozenset(locations), frozenset(domains),
-        when, when, "MINUTE" if when else None, tuple(cues))
+        when, when, "MINUTE" if when else None, tuple(cues), report_published_at=reported)
 
 
 def thread(*, participants=(IRAN, ISRAEL), actors=(ISRAEL,), targets=(IRAN,), locations=(NATANZ,),
-           domains=("MILITARY_SECURITY",), when=NOW, members=(), thread_id=None):
+           domains=("MILITARY_SECURITY",), when=NOW, members=(), thread_id=None, reported=None):
     return EventThreadCandidate(thread_id or uuid4(), "Israel–Iran Military Escalation", frozenset(actors),
         frozenset(participants), frozenset(targets), frozenset(locations), frozenset(domains), when, when, len(members) or 1,
-        tuple(members))
+        tuple(members) or (incident(title="Israeli missile strike on Natanz"),), reported)
 
 
 class EventThreadResolutionTest(unittest.TestCase):
+    def test_explicit_next_day_attack_reference_is_a_relationship_cue(self):
+        cue = _relationship_cues([{
+            "id": uuid4(),
+            "statement": "A projectile hit the airport, a day after a deadly attack there.",
+        }])
+        self.assertEqual(len(cue), 1)
+        self.assertEqual(cue[0]["relation"], "ESCALATED_FROM")
+
     def test_incident_without_candidates_creates_new_thread(self):
         current = incident()
         result = DeterministicEventThreadResolver().resolve(current, [])
         self.assertEqual(result.state, "NEW_THREAD")
         self.assertEqual(result.event_thread_id, current.current_thread_id)
 
-    def test_related_military_incident_continues_thread(self):
+    def test_shared_entities_domain_and_time_require_target_grounding(self):
         prior = thread()
         result = DeterministicEventThreadResolver().resolve(incident(when=NOW.replace(hour=11)), [prior])
-        self.assertEqual(result.state, "ASSIGNED_EXISTING_THREAD")
-        self.assertEqual(result.event_thread_id, prior.event_thread_id)
-        self.assertTrue(any(s["signal"] == "context_domain" for s in result.matched_signals))
+        self.assertEqual(result.state, "REVIEW_REQUIRED")
+        self.assertFalse(any(s["signal"] == "explicit_incident_relationship" for s in result.matched_signals))
 
     def test_explicit_retaliation_is_strong_cross_actor_relationship_evidence(self):
         prior = thread(participants=(IRAN, ISRAEL), actors=(ISRAEL,), targets=(IRAN,))
-        new = incident(actor=IRAN, participants=(IRAN, ISRAEL), cues=({"relation": "RESPONDED_TO", "claim_id": uuid4()},),
+        new = incident(actor=IRAN, participants=(IRAN, ISRAEL), cues=_relationship_cues([{"id": uuid4(), "statement": "Iran retaliated in response to the Israeli missile strike on Natanz."}]),
                        when=NOW.replace(hour=22))
         result = DeterministicEventThreadResolver().resolve(new, [prior])
         self.assertEqual(result.state, "ASSIGNED_EXISTING_THREAD")
@@ -73,15 +80,24 @@ class EventThreadResolutionTest(unittest.TestCase):
         prior = thread()
         without_cue = incident(when=NOW.replace(year=2027, month=1))
         self.assertNotEqual(DeterministicEventThreadResolver().resolve(without_cue, [prior]).state, "ASSIGNED_EXISTING_THREAD")
-        with_cue = incident(when=NOW.replace(year=2027, month=1), cues=({"relation": "RESPONDED_TO"},))
+        with_cue = incident(when=NOW.replace(year=2027, month=1), cues=_relationship_cues([{"id": uuid4(), "statement": "Iran retaliated in response to the Israeli missile strike on Natanz."}]))
         self.assertEqual(DeterministicEventThreadResolver().resolve(with_cue, [prior]).state, "ASSIGNED_EXISTING_THREAD")
 
     def test_unknown_time_is_not_invented_and_requires_explicit_relationship(self):
         prior = thread(when=None)
         new = incident(when=None)
         self.assertNotEqual(DeterministicEventThreadResolver().resolve(new, [prior]).state, "ASSIGNED_EXISTING_THREAD")
-        explicit = incident(when=None, cues=({"relation": "RESPONDED_TO"},))
+        explicit = incident(when=None, cues=_relationship_cues([{"id": uuid4(), "statement": "Iran retaliated in response to the Israeli missile strike on Natanz."}]))
         self.assertEqual(DeterministicEventThreadResolver().resolve(explicit, [prior]).state, "ASSIGNED_EXISTING_THREAD")
+
+    def test_publication_time_does_not_stand_in_for_unknown_occurrence_time(self):
+        prior = thread(when=None, reported=NOW)
+        new = incident(when=None, reported=NOW.replace(day=2))
+        result = DeterministicEventThreadResolver().resolve(new, [prior])
+        self.assertEqual(result.state, "REVIEW_REQUIRED")
+        self.assertNotEqual(result.event_thread_id, prior.event_thread_id)
+        signals = result.candidates_considered[0]["signals"]
+        self.assertTrue(any(s["signal"] == "reporting_time_continuity" and s["relation"] == "NEAR" for s in signals))
 
     def test_multiple_eligible_threads_are_ambiguous(self):
         current = incident()
@@ -97,7 +113,9 @@ class EventThreadResolutionTest(unittest.TestCase):
     def test_deterministic_title_uses_structured_names_and_domain(self):
         self.assertEqual(_thread_title(["Iran", "Israel"], {"MILITARY_SECURITY"}, uuid4()),
                          "Iran–Israel Military Escalation")
-        self.assertTrue(_thread_title([], set(), uuid4()).startswith("Event Thread "))
+        self.assertEqual(_thread_title([], set(), uuid4()), "Unclassified geopolitical event")
+        self.assertEqual(_thread_title([], set(), uuid4(), "A useful source headline"), "A useful source headline")
+        self.assertEqual(_thread_title([], set(), uuid4(), "Event Thread 94BE0771"), "Unclassified geopolitical event")
 
 
 if __name__ == "__main__":

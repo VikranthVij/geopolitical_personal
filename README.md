@@ -48,3 +48,7 @@ The initial feed list is intentionally small and editable in `backend/app/defaul
 The Feature 5 legacy preview defaults to rollback-only: `docker compose exec api python -m app.backfill_event_threads`. Review its report before persisting deterministic assignments with `--apply`.
 
 Do not expose the API or database directly to the public internet. Private remote access through Tailscale requires device/account authorization on the user's Mac and is not enabled by this project.
+
+## Version control
+
+Follow [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md): preserve unrelated work, verify each completed logical change, commit and push it to the intended remote, and confirm the remote SHA. Git synchronization does not authorize deployment or historical data correction.
